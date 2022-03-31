@@ -3,5 +3,12 @@ M-net Protocol Implementation for Python
 
 First pass at implementing the Mita-Teknik M-net protocol used with WP3000/IC1000/IC1100 controllers.
 
-This is most definitely a work in progress, and you are entirely on your own if you do something bad to your controller by using this code.
+This is most definitely a work in progress, and you are entirely on your own if you do something bad to your controller/turbi by using this code.
 
+Known Packet Types
+
+0x13a1 - some sort of login request? returns a packet_type 0x0001 with no data
+0x0c28 - seems to make a request for a specific MAINID/SUBID specified in the data section - gets an 0x0c29 response
+0x0c2a - seems to make a request for multiple MAINID/SUBIDs in the data, preceeded by the number of of requests, returns an 0x0c2b response.
+
+0x1390 - seen in responses - seems to indicate an error.
