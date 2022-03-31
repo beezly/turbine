@@ -1,0 +1,7 @@
+M-net Protocol Implementation for Python
+========================================
+
+First pass at implementing the Mita-Teknik M-net protocol used with WP3000/IC1000/IC1100 controllers.
+
+This is most definitely a work in progress, and you are entirely on your own if you do something bad to your controller by using this code.
+
