@@ -1,166 +1,300 @@
-import mnet
-import serial
-import time
-import bitstring
-import paho.mqtt.client as mqtt
+#!/usr/bin/env python3
+"""
+Wind Turbine Monitor
+
+Monitors wind turbine data via Mnet protocol and publishes to MQTT.
+"""
+
 import json
+import logging
+import time
+import threading
+from collections import deque
+from datetime import datetime
+from typing import Dict, Any, Optional
 
-TOPIC_PREFIX = 'turbine/'
+import paho.mqtt.client as mqtt
+import serial
+from flask import Flask, render_template
+from flask_socketio import SocketIO, emit
 
-next_command = None
-
-def convert_to_bits(data):
-    return bitstring.Bits(data).bin
+import mnet
 
 
-def bits_string(data):
-    return ' '.join([data[i:i+8] for i in range(0, len(data), 8)])
-
-def handle_command_message(client, userdata, message):
-    print('handling command')
-    global next_command
-    (mnet_client, DEST)=userdata
-    command_payload=message.payload.decode('utf-8')
-    print (f"message recevied: {message.topic}: {command_payload}")
-
-    match command_payload:
-        case "start":
-            print ("setting next_command to start")
-            next_command = mnet.Mnet.DATA_ID_START
-        case "stop":
-            print ("setting next_command to stop")
-            next_command = mnet.Mnet.DATA_ID_STOP
-        case "reset":
-            print ("setting next_command to reset")
-            next_command = mnet.Mnet.DATA_ID_RESET
-        case _:
-            print (f"Unknown Command {command_payload}")
-
-    return
-
-DEST = b'\x02'
-
-serial_device = serial.Serial(port='/dev/ttyUSB0', baudrate=38400, timeout=2)
-test = mnet.Mnet(serial_device)
-lastbits = ''
-counter = 0
-mqtt = mqtt.Client(client_id='turbine_mqtt',userdata=(test, DEST))
-mqtt.connect('mqtt.lan')
-mqtt.loop_start()
-
-(serial, serial_bytes) = test.get_serial_number(DEST)
-encoded_serial = test.encode_serial(serial_bytes)
-print(f'got serial: {serial}')
-
-command_topic = TOPIC_PREFIX+str(serial)+'/command'
-print(command_topic)
-mqtt.message_callback_add(command_topic,handle_command_message)
-mqtt.subscribe(command_topic)
-
-while True:
-    try:
-        data = test.encode(test.create_login_packet_data(), encoded_serial)
-        login = test.send_packet(DEST, b'\x13\xa1', data)
-        # print("login packet:", login)
-        # print("result1: ", test.send_packet(DEST, b'\x13\xa1', data))
-        # controller_time = test.request_data(
-        #    DEST, mnet.Mnet.DATA_ID_CONTROLLER_TIME)
-        # print('controller_time:', controller_time)
-
-        # print(next_command)
-        if next_command != None:
-            print(f"sending command: {next_command}")
-            try: 
-                r=test.send_command(DEST, next_command)
-                print(r)
-            finally:
-                next_command = None
-
-        gen_revs = test.request_data(DEST, mnet.Mnet.DATA_ID_GEN_REVS)
-        rotor_revs = test.request_data(DEST, mnet.Mnet.DATA_ID_ROTOR_REVS)
-        wind = test.request_data(DEST, mnet.Mnet.DATA_ID_WIND_SPEED)
-
-        l1v = test.request_data(DEST, mnet.Mnet.DATA_ID_L1V)
-        l2v = test.request_data(DEST, mnet.Mnet.DATA_ID_L2V)
-        l3v = test.request_data(DEST, mnet.Mnet.DATA_ID_L3V)
-        # l1a = test.request_data(DEST, mnet.Mnet.DATA_ID_L1A)
-        # l2a = test.request_data(DEST, mnet.Mnet.DATA_ID_L2A)
-        # l3a = test.request_data(DEST, mnet.Mnet.DATA_ID_L3A)
-        # l1p = l1v*l1a
-        # l2p = l2v*l2a
-        # l3p = l3v*l3a
-        # total_power = l1p+l2p+l3p
-
-        # print(
-        #    f'wind: {wind:.0f}m/s',
-        #    f'rotor: {rotor_revs:.0f}rpm',
-        # f'ph1: ( {l1v:.0f}v {l1a:.2f}a {l1p:.0f}W )',
-        # f'ph2: ( {l2v:.0f}v {l2a:.2f}a {l2p:.0f}W )',
-        ##    f'gen: {gen_revs:.0f}rpm'
-        #    # f'ph3: ( {l3v:.0f}v {l3a:.2f}a {l3p:.0f}W )',
-        # f'total_power: {total_power:.0f}W'
-        # )
-
-        # test_1 = test.request_data(DEST, mnet.Mnet.DATA_ID_TEST_1)
-        # test_2 = test.request_data(DEST, mnet.Mnet.DATA_ID_TEST_2)
-        # print(test_1, test_2, test_3)
-        # test_3 = test.request_data(DEST, mnet.Mnet.DATA_ID_TEST_3)
-        # print(test.request_data(DEST, b'\x9c\xac'))
-        # print(test.request_data(DEST, b'\x9c\xa8'))
-        power = test.request_data(DEST, mnet.Mnet.DATA_ID_GRID_POWER)
-        #print('power: ', power)
-        # for i in [1, 2, 3, 11, 12, 13, 14, 15, 16, 21, 22, 23, 24, 26, 27, 31, 32, 33, 34, 35, 36, 37, 41, 42, 43, 44, 45, 51, 52, 53, 54, 55, 56, 57, 61, 62, 63, 64]:
-        #    b = i*100
-        #    for y in range(31):
-        # for i in [1123, 1124, 1224, 4101, 4102, 10001, 101, 102, 201, 202]:
-        #    print('test_prod_g1: ', i, test.request_data(DEST,
-        #                                                 mnet.Mnet.DATA_ID_G1_PRODUCTION, i))
-        #    print('test_prod_sys: ', i, test.request_data(DEST,
-        #                                                  mnet.Mnet.DATA_ID_SYSTEM_PRODUCTION, i))
-        # print('multi: ', test.request_multiple_data(DEST, [
-        #      (mnet.Mnet.DATA_ID_GRID_VOLTAGE, 101), (mnet.Mnet.DATA_ID_GRID_VOLTAGE, 102)]))
-        #print('var: ', test.request_data(DEST, mnet.Mnet.DATA_ID_GRID_VAR, 101))
-        #print('gv: ', test.request_data(DEST, mnet.Mnet.DATA_ID_GRID_VOLTAGE, 101))
-        #print('system_production', test.request_data(
-        #    DEST, mnet.Mnet.DATA_ID_SYSTEM_PRODUCTION, 101))
-        # print('g1_production', test.request_data(
-        #    DEST, mnet.Mnet.DATA_ID_G1_PRODUCTION, 100))
-        # print('current_status_code', test.request_data(
-        #    DEST, mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 1))
-        #print(test.request_data(DEST, mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 101))
-        # for i in range(10):
-        #    data_list = [
-        #        (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, i*100),
-        #        (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, i*100+1),
-        #        (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, i*100+2)]
-        #    status_line = test.request_multiple_data(DEST, data_list)
-        #    [status_code, ts, message] = status_line
-        #    print('status: ',
-        #          test.timestamp_to_datetime(ts),
-        #          message,
-        #          status_code
-        #          )
-        latest_status_message = test.request_data(
-            DEST, mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2).strip()
-        mqtt_data = {
-            'wind_speed_mps': wind,
-            'rotor_rpm': rotor_revs,
-            'generator_rpm': gen_revs,
-            'power_W': power,
-            'status_message': latest_status_message,
-            'l1v': l1v,
-            'l2v': l2v,
-            'l3v': l3v
+class TurbineMonitor:
+    """Wind turbine monitoring and MQTT publishing."""
+    
+    TOPIC_PREFIX = 'turbine/'
+    DESTINATION = b'\x02'
+    POLL_INTERVAL = 1.0
+    ERROR_RETRY_DELAY = 10.0
+    INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
+    
+    def __init__(self, serial_port: str, mqtt_host: str, web_port: int = 5000):
+        self.serial_port = serial_port
+        self.mqtt_host = mqtt_host
+        self.web_port = web_port
+        self.pending_command: Optional[bytes] = None
+        self.logger = self._setup_logging()
+        
+        # Monitoring data
+        self.latest_data = {}
+        self.mqtt_log = deque(maxlen=100)
+        self.serial_log = deque(maxlen=100)
+        self.status = {'connected': False, 'last_update': None}
+        
+        # Web server
+        self.app = Flask(__name__)
+        self.socketio = SocketIO(self.app, cors_allowed_origins="*")
+        self._setup_web_routes()
+        
+        # Initialize connections
+        self.serial_device = serial.Serial(port=serial_port, baudrate=38400, timeout=2)
+        self.mnet_client = mnet.Mnet(self.serial_device)
+        self.mqtt_client = self._setup_mqtt()
+        
+        # Get turbine serial number
+        self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
+        self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
+        self.logger.info(f"Connected to turbine serial: {self.serial_number}")
+        
+        # Setup MQTT command subscription
+        self._setup_command_subscription()
+    
+    def _setup_logging(self) -> logging.Logger:
+        """Setup logging configuration."""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        return logging.getLogger(__name__)
+    
+    def _setup_web_routes(self):
+        """Setup Flask routes."""
+        @self.app.route('/')
+        def index():
+            return render_template('index.html')
+        
+        @self.socketio.on('connect')
+        def handle_connect():
+            emit('status', self.status)
+            emit('data', self.latest_data)
+    
+    def _log_mqtt(self, direction: str, topic: str, payload: str):
+        """Log MQTT activity."""
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'direction': direction,
+            'topic': topic,
+            'payload': payload
         }
-        print(mqtt_data)
-        pub_data = mqtt.publish(TOPIC_PREFIX+str(serial), json.dumps(mqtt_data))
-        pub_data.wait_for_publish()
-        # print(pub_data.is_published)
+        self.mqtt_log.append(entry)
+        self.socketio.emit('mqtt_log', entry)
+    
+    def _log_serial(self, direction: str, data: str):
+        """Log serial activity."""
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'direction': direction,
+            'data': data
+        }
+        self.serial_log.append(entry)
+        self.socketio.emit('serial_log', entry)
+    
+    def _setup_mqtt(self) -> mqtt.Client:
+        """Setup MQTT client."""
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='turbine_mqtt', userdata=self)
+        client.on_message = self._handle_command_message
+        client.connect(self.mqtt_host)
+        client.loop_start()
+        return client
+    
+    def _setup_command_subscription(self):
+        """Setup MQTT command topic subscription."""
+        command_topic = f"{self.TOPIC_PREFIX}{self.serial_number}/command"
+        self.mqtt_client.subscribe(command_topic)
+        self.logger.info(f"Subscribed to command topic: {command_topic}")
+    
+    def _handle_command_message(self, client, userdata, message):
+        """Handle incoming MQTT command messages."""
+        try:
+            command = message.payload.decode('utf-8').strip().lower()
+            self._log_mqtt('RX', message.topic, command)
+            self.logger.info(f"Received command: {command}")
+            
+            command_map = {
+                'start': mnet.Mnet.DATA_ID_START,
+                'stop': mnet.Mnet.DATA_ID_STOP,
+                'reset': mnet.Mnet.DATA_ID_RESET
+            }
+            
+            if command in command_map:
+                self.pending_command = command_map[command]
+                self.logger.info(f"Queued command: {command}")
+            else:
+                self.logger.warning(f"Unknown command: {command}")
+                
+        except Exception as e:
+            self.logger.error(f"Error handling command: {e}")
+    
+    def _clear_serial_buffers(self):
+        """Clear serial input/output buffers to prevent timing issues."""
+        try:
+            self.serial_device.reset_input_buffer()
+            self.serial_device.reset_output_buffer()
+        except Exception as e:
+            self.logger.warning(f"Buffer clear failed: {e}")
+    
+    def _login_to_turbine(self):
+        """Perform login to turbine."""
+        self._clear_serial_buffers()
+        login_data = self.mnet_client.encode(
+            self.mnet_client.create_login_packet_data(), 
+            self.encoded_serial
+        )
+        self._log_serial('TX', f'LOGIN: {login_data.hex()}')
+        self.mnet_client.send_packet(self.DESTINATION, b'\x13\xa1', login_data)
+        time.sleep(self.INTER_REQUEST_DELAY)
+    
+    def _execute_pending_command(self):
+        """Execute any pending command."""
+        if self.pending_command:
+            try:
+                self._clear_serial_buffers()
+                self.logger.info(f"Executing command: {self.pending_command}")
+                result = self.mnet_client.send_command(self.DESTINATION, self.pending_command)
+                self.logger.info(f"Command result: {result}")
+                time.sleep(self.INTER_REQUEST_DELAY)
+            except Exception as e:
+                self.logger.error(f"Command execution failed: {e}")
+            finally:
+                self.pending_command = None
+    
+    def _collect_turbine_data(self) -> Dict[str, Any]:
+        """Collect all turbine data with timing delays."""
+        data = {}
+        
+        # Core measurements with delays between requests
+        self._log_serial('TX', f'REQ: WIND_SPEED')
+        data['wind_speed_mps'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_WIND_SPEED)
+        self._log_serial('RX', f'WIND_SPEED: {data["wind_speed_mps"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        self._log_serial('TX', f'REQ: ROTOR_RPM')
+        data['rotor_rpm'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_ROTOR_REVS)
+        self._log_serial('RX', f'ROTOR_RPM: {data["rotor_rpm"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        self._log_serial('TX', f'REQ: GEN_RPM')
+        data['generator_rpm'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_GEN_REVS)
+        self._log_serial('RX', f'GEN_RPM: {data["generator_rpm"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        self._log_serial('TX', f'REQ: POWER')
+        data['power_W'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_GRID_POWER)
+        self._log_serial('RX', f'POWER: {data["power_W"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        # Voltage measurements
+        self._log_serial('TX', f'REQ: L1V')
+        data['l1v'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_L1V)
+        self._log_serial('RX', f'L1V: {data["l1v"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        self._log_serial('TX', f'REQ: L2V')
+        data['l2v'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_L2V)
+        self._log_serial('RX', f'L2V: {data["l2v"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        self._log_serial('TX', f'REQ: L3V')
+        data['l3v'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_L3V)
+        self._log_serial('RX', f'L3V: {data["l3v"]}')
+        time.sleep(self.INTER_REQUEST_DELAY)
+        
+        # Status message
+        self._log_serial('TX', f'REQ: STATUS')
+        data['status_message'] = self.mnet_client.request_data(
+            self.DESTINATION, mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2).strip()
+        self._log_serial('RX', f'STATUS: {data["status_message"]}')
+        
+        return data
+    
+    def _publish_data(self, data: Dict[str, Any]):
+        """Publish data to MQTT."""
+        topic = f"{self.TOPIC_PREFIX}{self.serial_number}"
+        payload = json.dumps(data)
+        
+        result = self.mqtt_client.publish(topic, payload)
+        result.wait_for_publish()
+        
+        self._log_mqtt('TX', topic, payload)
+        self.latest_data = data
+        self.status['last_update'] = datetime.now().isoformat()
+        self.status['connected'] = True
+        
+        self.socketio.emit('data', data)
+        self.socketio.emit('status', self.status)
+        
+        self.logger.info(f"Published data: {data}")
+    
+    def run(self):
+        """Main monitoring loop."""
+        self.logger.info("Starting turbine monitor")
+        
+        # Start web server in separate thread
+        web_thread = threading.Thread(
+            target=lambda: self.socketio.run(self.app, host='0.0.0.0', port=self.web_port, debug=False)
+        )
+        web_thread.daemon = True
+        web_thread.start()
+        self.logger.info(f"Web interface started on port {self.web_port}")
+        
+        while True:
+            try:
+                # Login to turbine
+                self._login_to_turbine()
+                
+                # Execute any pending commands
+                self._execute_pending_command()
+                
+                # Collect and publish data
+                turbine_data = self._collect_turbine_data()
+                self._publish_data(turbine_data)
+                
+                time.sleep(self.POLL_INTERVAL)
+                
+            except Exception as e:
+                self.logger.error(f"Monitor loop error: {e}")
+                self.status['connected'] = False
+                self.socketio.emit('status', self.status)
+                time.sleep(self.ERROR_RETRY_DELAY)
+    
+    def close(self):
+        """Clean shutdown."""
+        self.logger.info("Shutting down turbine monitor")
+        self.mqtt_client.loop_stop()
+        self.mqtt_client.disconnect()
+        self.serial_device.close()
 
-        time.sleep(1)
-    except Exception as ex:
-        print("EXCEPTION")
-        print(type(ex))
-        print(ex.args)
-        print(ex)
-        time.sleep(10)
+
+def main():
+    """Main entry point."""
+    monitor = TurbineMonitor('/dev/ttyUSB0', 'mqtt.lan', 5000)
+    
+    try:
+        monitor.run()
+    except KeyboardInterrupt:
+        print("\nShutdown requested...")
+    finally:
+        monitor.close()
+
+
+if __name__ == '__main__':
+    main()

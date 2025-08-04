@@ -1,3 +1,6 @@
 pySerial
 crc>=7.1.0
 bitstring
+flask
+flask-socketio
+paho-mqtt
