@@ -199,23 +199,18 @@ class TurbineMonitor:
         self._log_serial('RX', f'POWER: {data["power_W"]}')
         time.sleep(self.INTER_REQUEST_DELAY)
         
-        # Voltage measurements
-        self._log_serial('TX', f'REQ: L1V')
-        data['l1v'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_L1V)
-        self._log_serial('RX', f'L1V: {data["l1v"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        self._log_serial('TX', f'REQ: L2V')
-        data['l2v'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_L2V)
-        self._log_serial('RX', f'L2V: {data["l2v"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        self._log_serial('TX', f'REQ: L3V')
-        data['l3v'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_L3V)
-        self._log_serial('RX', f'L3V: {data["l3v"]}')
+        # Voltage measurements (all three simultaneously)
+        voltage_requests = [
+            (mnet.Mnet.DATA_ID_L1V, 0),
+            (mnet.Mnet.DATA_ID_L2V, 0),
+            (mnet.Mnet.DATA_ID_L3V, 0)
+        ]
+        self._log_serial('TX', 'REQ: L1V,L2V,L3V (multiple)')
+        voltages = self.mnet_client.request_multiple_data(self.DESTINATION, voltage_requests)
+        data['l1v'] = voltages[0]
+        data['l2v'] = voltages[1]
+        data['l3v'] = voltages[2]
+        self._log_serial('RX', f'VOLTAGES: L1V={data["l1v"]}, L2V={data["l2v"]}, L3V={data["l3v"]}')
         time.sleep(self.INTER_REQUEST_DELAY)
         
         # Status message
