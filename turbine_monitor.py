@@ -171,53 +171,34 @@ class TurbineMonitor:
                 self.pending_command = None
     
     def _collect_turbine_data(self) -> Dict[str, Any]:
-        """Collect all turbine data with timing delays."""
-        data = {}
-        
-        # Core measurements with delays between requests
-        self._log_serial('TX', f'REQ: WIND_SPEED')
-        data['wind_speed_mps'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_WIND_SPEED)
-        self._log_serial('RX', f'WIND_SPEED: {data["wind_speed_mps"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        self._log_serial('TX', f'REQ: ROTOR_RPM')
-        data['rotor_rpm'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_ROTOR_REVS)
-        self._log_serial('RX', f'ROTOR_RPM: {data["rotor_rpm"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        self._log_serial('TX', f'REQ: GEN_RPM')
-        data['generator_rpm'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_GEN_REVS)
-        self._log_serial('RX', f'GEN_RPM: {data["generator_rpm"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        self._log_serial('TX', f'REQ: POWER')
-        data['power_W'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_GRID_POWER)
-        self._log_serial('RX', f'POWER: {data["power_W"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
-        
-        # Voltage measurements (all three simultaneously)
-        voltage_requests = [
+        """Collect all turbine data using single multiple request."""
+        # All data requests in one call
+        data_requests = [
+            (mnet.Mnet.DATA_ID_WIND_SPEED, 0),
+            (mnet.Mnet.DATA_ID_ROTOR_REVS, 0),
+            (mnet.Mnet.DATA_ID_GEN_REVS, 0),
+            (mnet.Mnet.DATA_ID_GRID_POWER, 0),
             (mnet.Mnet.DATA_ID_L1V, 0),
             (mnet.Mnet.DATA_ID_L2V, 0),
-            (mnet.Mnet.DATA_ID_L3V, 0)
+            (mnet.Mnet.DATA_ID_L3V, 0),
+            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2)
         ]
-        self._log_serial('TX', 'REQ: L1V,L2V,L3V (multiple)')
-        voltages = self.mnet_client.request_multiple_data(self.DESTINATION, voltage_requests)
-        data['l1v'] = voltages[0]
-        data['l2v'] = voltages[1]
-        data['l3v'] = voltages[2]
-        self._log_serial('RX', f'VOLTAGES: L1V={data["l1v"]}, L2V={data["l2v"]}, L3V={data["l3v"]}')
-        time.sleep(self.INTER_REQUEST_DELAY)
         
-        # Status message
-        self._log_serial('TX', f'REQ: STATUS')
-        data['status_message'] = self.mnet_client.request_data(
-            self.DESTINATION, mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2).strip()
-        self._log_serial('RX', f'STATUS: {data["status_message"]}')
+        self._log_serial('TX', 'REQ: ALL_DATA (multiple)')
+        results = self.mnet_client.request_multiple_data(self.DESTINATION, data_requests)
+        
+        data = {
+            'wind_speed_mps': results[0],
+            'rotor_rpm': results[1],
+            'generator_rpm': results[2],
+            'power_W': results[3],
+            'l1v': results[4],
+            'l2v': results[5],
+            'l3v': results[6],
+            'status_message': results[7].strip() if isinstance(results[7], str) else str(results[7]).strip()
+        }
+        
+        self._log_serial('RX', f'ALL_DATA: Wind={data["wind_speed_mps"]:.1f}, Power={data["power_W"]:.0f}, RPM={data["rotor_rpm"]:.0f}/{data["generator_rpm"]:.0f}, V={data["l1v"]:.0f}/{data["l2v"]:.0f}/{data["l3v"]:.0f}')
         
         return data
     
