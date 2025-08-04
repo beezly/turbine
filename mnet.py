@@ -2,7 +2,7 @@ import serial
 import struct
 import sys
 import datetime
-from crc import CrcCalculator, Crc16
+from crc import Calculator, Crc16
 
 
 class Mnet:
@@ -49,7 +49,7 @@ class Mnet:
         EOT = b'\x04'
 
         def __init__(self, destination, source, packet_type, data_len, data, crc=None):
-            self.crc_calculator = CrcCalculator(Crc16.CCITT)
+            self.crc_calculator = Calculator(Crc16.XMODEM)
             self.destination = destination
             self.source = source
             self.packet_type = packet_type
@@ -59,7 +59,7 @@ class Mnet:
             self.real_data = self.data.replace(b'\xff', b'\xff\xff')
             self.packet = self.destination+self.source+self.packet_type + \
                 len(self.real_data).to_bytes(1, byteorder='big')+self.real_data
-            self.calculated_crc = self.crc_calculator.calculate_checksum(
+            self.calculated_crc = self.crc_calculator.checksum(
                 self.packet)
             if crc is None:
                 self.crc = self.calculated_crc
@@ -81,7 +81,7 @@ class Mnet:
     def __init__(self, device, id=b'\x01'):
         self.device = serial.Serial(port=device, baudrate=38400, timeout=2)
         self.id = id
-        self.crc_calculator = CrcCalculator(Crc16.CCITT)
+        self.crc_calculator = Calculator(Crc16.XMODEM)
         self.serial = None
         self.encoded_serial = None
 
