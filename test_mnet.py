@@ -85,26 +85,18 @@ class TestMnet(unittest.TestCase):
         self.device_path = '/dev/ttyUSB0'
         self.test_id = b'\x01'
         
-    @patch('mnet.serial.Serial')
-    def test_mnet_initialization(self, mock_serial_class):
+    def test_mnet_initialization(self):
         """Test Mnet class initialization."""
-        mock_serial_class.return_value = self.mock_serial
+        mnet_instance = Mnet(self.mock_serial, self.test_id)
         
-        mnet_instance = Mnet(self.device_path, self.test_id)
-        
-        mock_serial_class.assert_called_once_with(
-            port=self.device_path, baudrate=38400, timeout=2
-        )
         self.assertEqual(mnet_instance.id, self.test_id)
         self.assertEqual(mnet_instance.device, self.mock_serial)
         self.assertIsNone(mnet_instance.serial)
         self.assertIsNone(mnet_instance.encoded_serial)
         
-    @patch('mnet.serial.Serial')
-    def test_create_packet(self, mock_serial_class):
+    def test_create_packet(self):
         """Test packet creation method."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path, self.test_id)
+        mnet_instance = Mnet(self.mock_serial, self.test_id)
         
         destination = b'\x02'
         packet_type = b'\x0c\x28'
@@ -117,11 +109,9 @@ class TestMnet(unittest.TestCase):
         self.assertEqual(packet.source, self.test_id)
         self.assertEqual(packet.packet_type, packet_type)
         
-    @patch('mnet.serial.Serial')
-    def test_read_packet(self, mock_serial_class):
+    def test_read_packet(self):
         """Test reading packet from serial device."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         # Mock serial read responses
         header_data = struct.pack('!BBBHB', 0x01, 0x02, 0x01, 0x0c28, 2)
@@ -136,11 +126,9 @@ class TestMnet(unittest.TestCase):
         self.assertEqual(packet.data, data)
         self.assertEqual(packet.crc, 0x1234)
         
-    @patch('mnet.serial.Serial')
-    def test_read_packet_no_data(self, mock_serial_class):
+    def test_read_packet_no_data(self):
         """Test reading packet with no data payload."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         header_data = struct.pack('!BBBHB', 0x01, 0x02, 0x01, 0x0c28, 0)
         tail_data = struct.pack('!HB', 0x1234, 0x04)
@@ -151,11 +139,9 @@ class TestMnet(unittest.TestCase):
         
         self.assertEqual(packet.data, b'')
         
-    @patch('mnet.serial.Serial')
-    def test_get_serial_number(self, mock_serial_class):
+    def test_get_serial_number(self):
         """Test getting serial number from device."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         # Mock the response packet
         serial_data = struct.pack('!L', 12345678)
@@ -170,82 +156,74 @@ class TestMnet(unittest.TestCase):
             
     def test_encode_serial(self):
         """Test serial number encoding algorithm."""
-        with patch('mnet.serial.Serial'):
-            mnet_instance = Mnet(self.device_path)
-            
-            # Test with known values
-            serial_bytes = b'\x01\x02\x03\x04'
-            encoded = mnet_instance.encode_serial(serial_bytes)
-            
-            self.assertEqual(len(encoded), 5)
-            self.assertIsInstance(encoded, bytearray)
+        mnet_instance = Mnet(self.mock_serial)
+        
+        # Test with known values
+        serial_bytes = b'\x01\x02\x03\x04'
+        encoded = mnet_instance.encode_serial(serial_bytes)
+        
+        self.assertEqual(len(encoded), 5)
+        self.assertIsInstance(encoded, bytearray)
             
     def test_encode_decode_data(self):
         """Test data encoding and decoding."""
-        with patch('mnet.serial.Serial'):
-            mnet_instance = Mnet(self.device_path)
-            
-            original_data = b'Hello, World!'
-            enc_serial = bytearray([0x01, 0x02, 0x03, 0x04, 0x05])
-            
-            encoded = mnet_instance.encode(original_data, enc_serial)
-            decoded = mnet_instance.decode(encoded, enc_serial)
-            
-            self.assertEqual(decoded, original_data)
+        mnet_instance = Mnet(self.mock_serial)
+        
+        original_data = b'Hello, World!'
+        enc_serial = bytearray([0x01, 0x02, 0x03, 0x04, 0x05])
+        
+        encoded = mnet_instance.encode(original_data, enc_serial)
+        decoded = mnet_instance.decode(encoded, enc_serial)
+        
+        self.assertEqual(decoded, original_data)
             
     def test_decode_data_types(self):
         """Test decoding different data types."""
-        with patch('mnet.serial.Serial'):
-            mnet_instance = Mnet(self.device_path)
-            
-            # Test type 0x1 (signed byte) - this will fail due to bug in original code
-            data = struct.pack('!BBHB', 0x1, 0x0, 0x0, 0x1) + struct.pack('!b', -5)
-            with self.assertRaises(UnboundLocalError):
-                mnet_instance.decode_data(data)
-            
-            # Test type 0x4 (unsigned short) with conversion - this works
-            data = struct.pack('!BBHB', 0x4, 0x1, 0x2, 0x2) + struct.pack('!H', 1234)
-            data_type, value = mnet_instance.decode_data(data)
-            self.assertEqual(data_type, 0x4)
-            self.assertEqual(value, 12.34)  # 1234 / 10^2
+        mnet_instance = Mnet(self.mock_serial)
+        
+        # Test type 0x1 (signed byte) - this will fail due to bug in original code
+        data = struct.pack('!BBHB', 0x1, 0x0, 0x0, 0x1) + struct.pack('!b', -5)
+        with self.assertRaises(UnboundLocalError):
+            mnet_instance.decode_data(data)
+        
+        # Test type 0x4 (unsigned short) with conversion - this works
+        data = struct.pack('!BBHB', 0x4, 0x1, 0x2, 0x2) + struct.pack('!H', 1234)
+        data_type, value = mnet_instance.decode_data(data)
+        self.assertEqual(data_type, 0x4)
+        self.assertEqual(value, 12.34)  # 1234 / 10^2
             
     def test_decode_multiple_data(self):
         """Test decoding multiple data elements."""
-        with patch('mnet.serial.Serial'):
-            mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
+        
+        # This test will fail due to the bug in decode_data method
+        # Create test data with 2 elements
+        num_elements = 2
+        element1_header = struct.pack("!HHBBHB", 0x9c43, 0x0000, 0x1, 0x0, 0x0, 0x1)
+        element1_data = struct.pack('!b', 10)
+        element2_header = struct.pack("!HHBBHB", 0x9c47, 0x0000, 0x4, 0x1, 0x1, 0x2)
+        element2_data = struct.pack('!H', 1500)
+        
+        test_data = (bytes([num_elements]) + 
+                    element1_header + element1_data +
+                    element2_header + element2_data)
+        
+        # This will raise UnboundLocalError due to bug in decode_data
+        with self.assertRaises(UnboundLocalError):
+            mnet_instance.decode_multiple_data(test_data)
             
-            # This test will fail due to the bug in decode_data method
-            # Create test data with 2 elements
-            num_elements = 2
-            element1_header = struct.pack("!HHBBHB", 0x9c43, 0x0000, 0x1, 0x0, 0x0, 0x1)
-            element1_data = struct.pack('!b', 10)
-            element2_header = struct.pack("!HHBBHB", 0x9c47, 0x0000, 0x4, 0x1, 0x1, 0x2)
-            element2_data = struct.pack('!H', 1500)
-            
-            test_data = (bytes([num_elements]) + 
-                        element1_header + element1_data +
-                        element2_header + element2_data)
-            
-            # This will raise UnboundLocalError due to bug in decode_data
-            with self.assertRaises(UnboundLocalError):
-                mnet_instance.decode_multiple_data(test_data)
-            
-    @patch('mnet.serial.Serial')
-    def test_create_login_packet_data(self, mock_serial_class):
+    def test_create_login_packet_data(self):
         """Test login packet data creation."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         login_data = mnet_instance.create_login_packet_data()
         
         self.assertEqual(len(login_data), 32)  # 20 + 12 bytes
         self.assertTrue(login_data.startswith(Mnet.LOGIN_131_GAIA_WIND))
         
-    @patch('mnet.serial.Serial')
-    def test_send_command(self, mock_serial_class):
+    def test_send_command(self):
         """Test sending command to device."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         # Mock serial number retrieval
         mnet_instance.serial = 12345678
@@ -257,11 +235,9 @@ class TestMnet(unittest.TestCase):
             
             self.assertEqual(result, mock_response)
             
-    @patch('mnet.serial.Serial')
-    def test_request_data(self, mock_serial_class):
+    def test_request_data(self):
         """Test requesting single data value."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         # Mock dependencies
         mnet_instance.serial = 12345678
@@ -279,11 +255,9 @@ class TestMnet(unittest.TestCase):
                     
                     self.assertEqual(result, 12.34)
                     
-    @patch('mnet.serial.Serial')
-    def test_request_multiple_data(self, mock_serial_class):
+    def test_request_multiple_data(self):
         """Test requesting multiple data values."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         # Mock dependencies
         mnet_instance.serial = 12345678
@@ -304,11 +278,9 @@ class TestMnet(unittest.TestCase):
                     self.assertEqual(result[0], 15.5)
                     self.assertEqual(result[1], 1800)
                     
-    @patch('mnet.serial.Serial')
-    def test_request_multiple_data_with_ids(self, mock_serial_class):
+    def test_request_multiple_data_with_ids(self):
         """Test requesting multiple data values with IDs included."""
-        mock_serial_class.return_value = self.mock_serial
-        mnet_instance = Mnet(self.device_path)
+        mnet_instance = Mnet(self.mock_serial)
         
         mnet_instance.serial = 12345678
         mnet_instance.encoded_serial = bytearray([1, 2, 3, 4, 5])
@@ -331,15 +303,14 @@ class TestMnet(unittest.TestCase):
                     
     def test_timestamp_to_datetime(self):
         """Test timestamp conversion to datetime."""
-        with patch('mnet.serial.Serial'):
-            mnet_instance = Mnet(self.device_path)
-            
-            # Test with known timestamp
-            seconds = 86400  # 1 day after epoch
-            result = mnet_instance.timestamp_to_datetime(seconds)
-            
-            expected = datetime.datetime(1980, 1, 2)  # 1 day after 1980-01-01
-            self.assertEqual(result, expected)
+        mnet_instance = Mnet(self.mock_serial)
+        
+        # Test with known timestamp
+        seconds = 86400  # 1 day after epoch
+        result = mnet_instance.timestamp_to_datetime(seconds)
+        
+        expected = datetime.datetime(1980, 1, 2)  # 1 day after 1980-01-01
+        self.assertEqual(result, expected)
             
     def test_constants(self):
         """Test that all required constants are defined."""
@@ -361,13 +332,11 @@ class TestMnet(unittest.TestCase):
 class TestMnetIntegration(unittest.TestCase):
     """Integration tests for Mnet functionality."""
     
-    @patch('mnet.serial.Serial')
-    def test_full_workflow(self, mock_serial_class):
+    def test_full_workflow(self):
         """Test a complete workflow from initialization to data request."""
         mock_serial = Mock()
-        mock_serial_class.return_value = mock_serial
         
-        mnet_instance = Mnet('/dev/ttyUSB0')
+        mnet_instance = Mnet(mock_serial)
         
         # Mock serial number response
         serial_response = Mock()
@@ -399,19 +368,18 @@ class TestMnetIntegration(unittest.TestCase):
 class TestMnetErrorHandling(unittest.TestCase):
     """Test error handling in Mnet class."""
     
-    @patch('mnet.serial.Serial')
-    def test_serial_connection_error(self, mock_serial_class):
+    def test_serial_connection_error(self):
         """Test handling of serial connection errors."""
-        mock_serial_class.side_effect = Exception("Serial port not found")
+        mock_device = Mock()
+        mock_device.read.side_effect = Exception("Serial port not found")
         
+        mnet_instance = Mnet(mock_device)
         with self.assertRaises(Exception):
-            Mnet('/dev/nonexistent')
+            mnet_instance.read_packet()
             
-    @patch('mnet.serial.Serial')
-    def test_decode_data_invalid_type(self, mock_serial_class):
+    def test_decode_data_invalid_type(self):
         """Test handling of invalid data types in decode_data."""
-        mock_serial_class.return_value = Mock()
-        mnet_instance = Mnet('/dev/ttyUSB0')
+        mnet_instance = Mnet(Mock())
         
         # Test with unsupported data type
         invalid_data = struct.pack('!BBHB', 0xFF, 0x0, 0x0, 0x1) + b'\x00'

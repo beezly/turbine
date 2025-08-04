@@ -1,4 +1,3 @@
-import serial
 import struct
 import sys
 import datetime
@@ -79,7 +78,7 @@ class Mnet:
             return self.SOH+self.packet+self.crc.to_bytes(2, byteorder='big')+self.EOT
 
     def __init__(self, device, id=b'\x01'):
-        self.device = serial.Serial(port=device, baudrate=38400, timeout=2)
+        self.device = device
         self.id = id
         self.crc_calculator = Calculator(Crc16.XMODEM)
         self.serial = None

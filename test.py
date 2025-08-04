@@ -1,4 +1,5 @@
 import mnet
+import serial
 import time
 import bitstring
 import paho.mqtt.client as mqtt
@@ -39,7 +40,8 @@ def handle_command_message(client, userdata, message):
 
 DEST = b'\x02'
 
-test = mnet.Mnet('/dev/ttyUSB0')
+serial_device = serial.Serial(port='/dev/ttyUSB0', baudrate=38400, timeout=2)
+test = mnet.Mnet(serial_device)
 lastbits = ''
 counter = 0
 mqtt = mqtt.Client(client_id='turbine_mqtt',userdata=(test, DEST))

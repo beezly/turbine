@@ -14,11 +14,10 @@ from mnet import Mnet
 class TestCRCBaseline(unittest.TestCase):
     """Critical CRC baseline tests - values must never change."""
     
-    @patch('mnet.serial.Serial')
-    def test_crc_baseline_values(self, mock_serial):
+    def test_crc_baseline_values(self):
         """CRITICAL: These CRC values must remain identical after any code changes."""
-        mock_serial.return_value = None
-        mnet_instance = Mnet('/dev/test')
+        from unittest.mock import Mock
+        mnet_instance = Mnet(Mock())
         
         # BASELINE CRC VALUES - DO NOT CHANGE THESE
         baseline_crcs = [
@@ -44,10 +43,8 @@ class TestCRCBaseline(unittest.TestCase):
                     f"CRITICAL CRC REGRESSION: Data {data.hex()} expected 0x{expected_crc:04x}, got 0x{calculated_crc:04x}"
                 )
     
-    @patch('mnet.serial.Serial') 
-    def test_packet_crc_baseline(self, mock_serial):
+    def test_packet_crc_baseline(self):
         """Test CRC calculations for actual MnetPacket objects."""
-        mock_serial.return_value = None
         
         # Test packet CRC calculations
         packet_tests = [
@@ -66,10 +63,8 @@ class TestCRCBaseline(unittest.TestCase):
                     f"Packet CRC regression for data {data.hex()}"
                 )
     
-    @patch('mnet.serial.Serial')
-    def test_crc_with_data_escaping(self, mock_serial):
+    def test_crc_with_data_escaping(self):
         """Test CRC calculation with 0xFF byte escaping."""
-        mock_serial.return_value = None
         
         # Data with 0xFF bytes that get escaped in packet
         test_data = b'\x9c\xff\x43'
@@ -80,7 +75,8 @@ class TestCRCBaseline(unittest.TestCase):
         
         # The CRC should be calculated on the full packet including escaped data
         expected_packet_data = b'\x02\x01\x0c\x28\x04\x9c\xff\xff\x43'
-        mnet_instance = Mnet('/dev/test')
+        from unittest.mock import Mock
+        mnet_instance = Mnet(Mock())
         expected_crc = mnet_instance.crc_calculator.checksum(expected_packet_data)
         
         # Store the actual CRC as baseline
