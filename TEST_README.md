@@ -2,6 +2,13 @@
 
 This document describes the comprehensive test suite for the `mnet.py` module.
 
+## Test Frameworks
+
+- **unittest**: Python's built-in testing framework for test structure
+- **pytest**: Enhanced test runner with better reporting and fixtures
+- **unittest.mock**: Mocking framework for isolating dependencies
+- **pytest-cov**: Coverage reporting integration
+
 ## Test Structure
 
 The test suite is organized into several test classes:
@@ -32,9 +39,15 @@ Integration tests that verify complete workflows:
 
 ### TestMnetErrorHandling
 Error handling and edge case tests:
-- Serial connection failures
+- Device communication failures
 - Invalid data type handling
 - Malformed packet handling
+
+### CRC Regression Tests
+Specialized tests to ensure CRC calculations remain unchanged:
+- **test_crc_baseline.py**: Critical baseline CRC values
+- **test_crc_regression.py**: Comprehensive CRC validation
+- **verify_crc.py**: Simple verification script
 
 ## Running Tests
 
@@ -91,6 +104,9 @@ make test-verbose
 make test-packet
 make test-main
 make test-integration
+
+# CRC regression verification
+python verify_crc.py
 ```
 
 ### Coverage Reports
@@ -101,9 +117,10 @@ When running with coverage, reports are generated in:
 
 ## Test Features
 
-### Mocking Strategy
-- **Serial Communication**: All serial I/O is mocked to avoid hardware dependencies
-- **External Dependencies**: CRC calculations and struct operations are tested with real implementations
+### Simplified Testing Approach
+- **No Serial Mocking Required**: Tests use mock device objects directly
+- **Dependency Injection**: Serial devices are passed to Mnet constructor
+- **Clean Separation**: Serial creation is external to Mnet class
 - **Isolation**: Each test is independent and doesn't affect others
 
 ### Test Data
@@ -126,12 +143,11 @@ def test_packet_creation(self):
     # ... additional assertions
 ```
 
-### 2. Serial Communication Mocking
+### 2. Device Injection Testing
 ```python
-@patch('mnet.serial.Serial')
-def test_mnet_initialization(self, mock_serial_class):
-    mock_serial_class.return_value = self.mock_serial
-    mnet_instance = Mnet(device_path, test_id)
+def test_mnet_initialization(self):
+    mock_device = Mock()
+    mnet_instance = Mnet(mock_device, test_id)
     # ... test assertions
 ```
 
@@ -144,6 +160,18 @@ def test_encode_decode_data(self):
     self.assertEqual(decoded, original_data)
 ```
 
+## Architecture Benefits
+
+### Simplified Testing (No Serial Mocking)
+- **Before**: Required `@patch('mnet.serial.Serial')` decorators
+- **After**: Direct mock device injection
+- **Result**: Cleaner, faster, more maintainable tests
+
+### Dependency Injection
+- Serial device creation moved to calling code
+- Mnet class accepts device object in constructor
+- Better separation of concerns
+
 ## Best Practices Implemented
 
 1. **Test Isolation**: Each test is independent and uses fresh mocks
@@ -152,7 +180,7 @@ def test_encode_decode_data(self):
 4. **Clear Naming**: Test names clearly describe what is being tested
 5. **Setup/Teardown**: Proper test fixture management
 6. **Documentation**: Each test class and complex test has docstrings
-7. **Parameterization**: Where appropriate, tests use multiple data sets
+7. **CRC Protection**: Regression tests prevent unintended CRC changes
 8. **Error Testing**: Explicit testing of error conditions and exception handling
 
 ## Continuous Integration
@@ -168,18 +196,19 @@ The test suite is designed to run in CI environments:
 When adding new functionality to `mnet.py`:
 
 1. Add corresponding test methods to appropriate test class
-2. Use existing mocking patterns for serial communication
+2. Use mock devices directly (no patching required)
 3. Test both success and failure scenarios
-4. Update this documentation if adding new test categories
-5. Ensure new tests follow the established naming conventions
+4. Run CRC verification if changes affect CRC calculations
+5. Update this documentation if adding new test categories
+6. Ensure new tests follow the established naming conventions
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. **Import Errors**: Ensure all dependencies are installed via `requirements-test.txt`
-2. **Mock Issues**: Verify that patches are applied to the correct module paths
-3. **Serial Errors**: All serial communication should be mocked - no real hardware needed
+2. **CRC Changes**: Run `python verify_crc.py` to check for CRC calculation changes
+3. **Device Errors**: Tests use mock devices - no real hardware needed
 
 ### Debug Mode
 Run tests with additional debugging:
