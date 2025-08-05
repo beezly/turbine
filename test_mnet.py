@@ -236,7 +236,7 @@ class TestMnet(unittest.TestCase):
         
         mock_response = Mock()
         with patch.object(mnet_instance, 'send_packet', return_value=mock_response):
-            result = mnet_instance.send_command(b'\x02', Mnet.DATA_ID_START)
+            result = mnet_instance.send_command(b'\x02', Mnet.DATA_COMMAND_START)
             
             self.assertEqual(result, mock_response)
             
@@ -327,7 +327,7 @@ class TestMnet(unittest.TestCase):
             'DATA_ID_SYSTEM_PRODUCTION', 'DATA_ID_G1_PRODUCTION', 'DATA_ID_CONTROLLER_TIME',
             'DATA_ID_GRID_POWER', 'DATA_ID_GRID_CURRENT', 'DATA_ID_GRID_VOLTAGE', 'DATA_ID_GRID_VAR',
             'DATA_ID_CURRENT_STATUS_CODE', 'DATA_ID_EVENT_STACK_STATUS_CODE',
-            'DATA_ID_EMPTY', 'DATA_ID_START', 'DATA_ID_STOP', 'DATA_ID_RESET'
+            'DATA_COMMAND_EMPTY', 'DATA_COMMAND_START', 'DATA_COMMAND_STOP', 'DATA_COMMAND_RESET', 'DATA_COMMAND_MANUAL_START'
         ]
         
         for constant in constants:

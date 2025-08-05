@@ -88,11 +88,25 @@ class Mnet:
     DATA_ID_CURRENT_STATUS_CODE = b'\x00\x0c'
     DATA_ID_EVENT_STACK_STATUS_CODE = b'\x00\x0b'
     
+    # Real-time measurements averaging - from DATAID.DAT
+
+    DATA_AVERAGING_CURRENT = 0
+    DATA_AVERAGING_20MSEC = 1000
+    DATA_AVERAGING_100MSEC = 1500
+    DATA_AVERAGING_1SEC = 2000
+    DATA_AVERAGING_30SEC = 3000
+    DATA_AVERAGING_1MIN = 4000
+    DATA_AVERAGING_10MIN = 5000
+    DATA_AVERAGING_30MIN = 6000
+    DATA_AVERAGING_1HR = 7000
+    DATA_AVERAGING_24HR = 8000
+
     # Command IDs
-    DATA_ID_EMPTY = b'\x00\x00'
-    DATA_ID_START = b'\x00\x01'
-    DATA_ID_STOP = b'\x00\x02'
-    DATA_ID_RESET = b'\x00\x03'
+    DATA_COMMAND_EMPTY = b'\x00\x00'
+    DATA_COMMAND_START = b'\x00\x01'
+    DATA_COMMAND_STOP = b'\x00\x02'
+    DATA_COMMAND_RESET = b'\x00\x03'
+    DATA_COMMAND_MANUAL_START = b'\x00x04'
     
     # Legacy inner class for backward compatibility
     MnetPacket = MnetPacket
@@ -108,6 +122,7 @@ class Mnet:
         self.id = id
         self.serial: Optional[int] = None
         self.encoded_serial: Optional[bytearray] = None
+        self._log_callback = None
     
     def create_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Create an Mnet packet."""
@@ -116,8 +131,21 @@ class Mnet:
     def send_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Send packet and return response."""
         packet = self.create_packet(destination, packet_type, data)
-        self.device.write(bytes(packet))
-        return self.read_packet()
+        packet_bytes = bytes(packet)
+        
+        # Log outgoing packet
+        if hasattr(self, '_log_callback'):
+            self._log_callback('TX', packet_bytes.hex(), str(packet))
+        
+        self.device.write(packet_bytes)
+        response = self.read_packet()
+        
+        # Log incoming response
+        if hasattr(self, '_log_callback'):
+            response_bytes = bytes(response)
+            self._log_callback('RX', response_bytes.hex(), str(response))
+        
+        return response
     
     def read_packet(self) -> MnetPacket:
         """Read packet from device."""
@@ -335,6 +363,12 @@ class Mnet:
         
         response = self.send_packet(destination, self.REQ_MULTIPLE_DATA, request_data)
         decoded_data = self.decode(response.data, self.encoded_serial)
+        
+        # Log decrypted data
+        if hasattr(self, '_log_callback'):
+            ascii_data = decoded_data.decode('ascii', errors='replace')
+            self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {ascii_data}')
+        
         results = self.decode_multiple_data(decoded_data)
         
         if include_ids:

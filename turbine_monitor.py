@@ -9,6 +9,7 @@ import json
 import logging
 import time
 import threading
+import traceback
 from collections import deque
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -51,6 +52,7 @@ class TurbineMonitor:
         # Initialize connections
         self.serial_device = serial.Serial(port=serial_port, baudrate=38400, timeout=2)
         self.mnet_client = mnet.Mnet(self.serial_device)
+        self.mnet_client._log_callback = self._log_serial_hex
         self.mqtt_client = self._setup_mqtt()
         
         # Get turbine serial number
@@ -101,6 +103,22 @@ class TurbineMonitor:
         self.serial_log.append(entry)
         self.socketio.emit('serial_log', entry)
     
+    def _log_serial_hex(self, direction: str, hex_data: str, decoded: str):
+        """Log serial activity with hex and decoded data."""
+        # Convert hex to ASCII
+        try:
+            ascii_data = bytes.fromhex(hex_data).decode('ascii', errors='replace')
+        except:
+            ascii_data = 'N/A'
+        
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'direction': direction,
+            'data': f'HEX: {hex_data} | ASCII: {ascii_data} | {decoded}'
+        }
+        self.serial_log.append(entry)
+        self.socketio.emit('serial_log', entry)
+    
     def _setup_mqtt(self) -> mqtt.Client:
         """Setup MQTT client."""
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='turbine_mqtt', userdata=self)
@@ -136,6 +154,7 @@ class TurbineMonitor:
                 
         except Exception as e:
             self.logger.error(f"Error handling command: {e}")
+            self.logger.error(traceback.format_exc())
     
     def _clear_serial_buffers(self):
         """Clear serial input/output buffers to prevent timing issues."""
@@ -144,6 +163,7 @@ class TurbineMonitor:
             self.serial_device.reset_output_buffer()
         except Exception as e:
             self.logger.warning(f"Buffer clear failed: {e}")
+            self.logger.warning(traceback.format_exc())
     
     def _login_to_turbine(self):
         """Perform login to turbine."""
@@ -163,38 +183,67 @@ class TurbineMonitor:
                 time.sleep(self.INTER_REQUEST_DELAY)
             except Exception as e:
                 self.logger.error(f"Command execution failed: {e}")
+                self.logger.error(traceback.format_exc())
             finally:
                 self.pending_command = None
     
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
-        # All data requests in one call
-        data_requests = [
-            (mnet.Mnet.DATA_ID_WIND_SPEED, 0),
-            (mnet.Mnet.DATA_ID_ROTOR_REVS, 0),
-            (mnet.Mnet.DATA_ID_GEN_REVS, 0),
-            (mnet.Mnet.DATA_ID_GRID_POWER, 0),
-            (mnet.Mnet.DATA_ID_L1V, 0),
-            (mnet.Mnet.DATA_ID_L2V, 0),
-            (mnet.Mnet.DATA_ID_L3V, 0),
-            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2)
+        # Current values request
+        current_requests = [
+            (mnet.Mnet.DATA_ID_WIND_SPEED, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_ROTOR_REVS, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_GEN_REVS, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_GRID_POWER, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_L1V, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_CURRENT),
+            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2),
+            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 1),
+            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 0),
+            (mnet.Mnet.DATA_ID_CONTROLLER_TIME, 0)
+            
         ]
         
-        self._log_serial('TX', 'REQ: ALL_DATA (multiple)')
-        results = self.mnet_client.request_multiple_data(self.DESTINATION, data_requests)
+        # 1-minute averages request
+        avg_requests = [
+            (mnet.Mnet.DATA_ID_GRID_POWER, mnet.Mnet.DATA_AVERAGING_1MIN),
+            (mnet.Mnet.DATA_ID_L1V, mnet.Mnet.DATA_AVERAGING_1MIN),
+            (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_1MIN),
+            (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN)
+        ]
+        
+        self._log_serial('TX', 'REQ: CURRENT_DATA')
+        current_results = self.mnet_client.request_multiple_data(self.DESTINATION, current_requests)
+        
+        self._log_serial('TX', 'REQ: 1MIN_AVERAGES')
+        avg_results = self.mnet_client.request_multiple_data(self.DESTINATION, avg_requests)
         
         data = {
-            'wind_speed_mps': results[0],
-            'rotor_rpm': results[1],
-            'generator_rpm': results[2],
-            'power_W': results[3],
-            'l1v': results[4],
-            'l2v': results[5],
-            'l3v': results[6],
-            'status_message': results[7].strip() if isinstance(results[7], str) else str(results[7]).strip()
+            'wind_speed_mps': current_results[0],
+            'rotor_rpm': current_results[1],
+            'generator_rpm': current_results[2],
+            'power_W': current_results[3],
+            'l1v': current_results[4],
+            'l2v': current_results[5],
+            'l3v': current_results[6],
+            'status_message': current_results[7].strip() if isinstance(current_results[7], str) else str(current_results[7]).strip(),
+            'event_stack_2': current_results[7],
+            'event_stack_1': current_results[8],
+            'event_stack_0': current_results[9],
+            'controller_time': current_results[10],
+            # 1-minute averages
+            'power_W_1min': avg_results[0],
+            'l1v_1min': avg_results[1],
+            'l2v_1min': avg_results[2],
+            'l3v_1min': avg_results[3]
         }
         
-        self._log_serial('RX', f'ALL_DATA: Wind={data["wind_speed_mps"]:.1f}, Power={data["power_W"]:.0f}, RPM={data["rotor_rpm"]:.0f}/{data["generator_rpm"]:.0f}, V={data["l1v"]:.0f}/{data["l2v"]:.0f}/{data["l3v"]:.0f}')
+        # Safe formatting for None values
+        def safe_format(val, fmt):
+            return f'{val:{fmt}}' if val is not None else 'None'
+        
+        self._log_serial('RX', f'ALL_DATA: Wind={safe_format(data["wind_speed_mps"], ".1f")}, Power={safe_format(data["power_W"], ".0f")}W (1min:{safe_format(data["power_W_1min"], ".0f")}W), RPM={safe_format(data["rotor_rpm"], ".0f")}/{safe_format(data["generator_rpm"], ".0f")}, V={safe_format(data["l1v"], ".0f")}/{safe_format(data["l2v"], ".0f")}/{safe_format(data["l3v"], ".0f")}')
         
         return data
     
@@ -244,6 +293,7 @@ class TurbineMonitor:
                 
             except Exception as e:
                 self.logger.error(f"Monitor loop error: {e}")
+                self.logger.error(traceback.format_exc())
                 self.status['connected'] = False
                 self.socketio.emit('status', self.status)
                 time.sleep(self.ERROR_RETRY_DELAY)
