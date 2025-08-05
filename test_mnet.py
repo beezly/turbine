@@ -181,10 +181,11 @@ class TestMnet(unittest.TestCase):
         """Test decoding different data types."""
         mnet_instance = Mnet(self.mock_serial)
         
-        # Test type 0x1 (signed byte) - this will fail due to bug in original code
+        # Test type 0x1 (signed byte) - now works correctly
         data = struct.pack('!BBHB', 0x1, 0x0, 0x0, 0x1) + struct.pack('!b', -5)
-        with self.assertRaises(UnboundLocalError):
-            mnet_instance.decode_data(data)
+        data_type, value = mnet_instance.decode_data(data)
+        self.assertEqual(data_type, 0x1)
+        self.assertEqual(value, -5)
         
         # Test type 0x4 (unsigned short) with conversion - this works
         data = struct.pack('!BBHB', 0x4, 0x1, 0x2, 0x2) + struct.pack('!H', 1234)
@@ -196,7 +197,7 @@ class TestMnet(unittest.TestCase):
         """Test decoding multiple data elements."""
         mnet_instance = Mnet(self.mock_serial)
         
-        # This test will fail due to the bug in decode_data method
+        # Test decoding multiple data elements - now works correctly
         # Create test data with 2 elements
         num_elements = 2
         element1_header = struct.pack("!HHBBHB", 0x9c43, 0x0000, 0x1, 0x0, 0x0, 0x1)
@@ -208,9 +209,13 @@ class TestMnet(unittest.TestCase):
                     element1_header + element1_data +
                     element2_header + element2_data)
         
-        # This will raise UnboundLocalError due to bug in decode_data
-        with self.assertRaises(UnboundLocalError):
-            mnet_instance.decode_multiple_data(test_data)
+        # This now works correctly
+        result = mnet_instance.decode_multiple_data(test_data)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][0], 0x9c43)  # mainid
+        self.assertEqual(result[0][2][1], 10)   # decoded value
+        self.assertEqual(result[1][0], 0x9c47)  # mainid
+        self.assertEqual(result[1][2][1], 150.0) # decoded value (1500 / 10^1)
             
     def test_create_login_packet_data(self):
         """Test login packet data creation."""
@@ -384,8 +389,8 @@ class TestMnetErrorHandling(unittest.TestCase):
         # Test with unsupported data type
         invalid_data = struct.pack('!BBHB', 0xFF, 0x0, 0x0, 0x1) + b'\x00'
         
-        # Should raise UnboundLocalError for unsupported types due to bug in original code
-        with self.assertRaises(UnboundLocalError):
+        # Should raise ValueError for unsupported types (improved error handling)
+        with self.assertRaises(ValueError):
             mnet_instance.decode_data(invalid_data)
 
 
