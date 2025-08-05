@@ -148,12 +148,8 @@ class TurbineMonitor:
     def _login_to_turbine(self):
         """Perform login to turbine."""
         self._clear_serial_buffers()
-        login_data = self.mnet_client.encode(
-            self.mnet_client.create_login_packet_data(), 
-            self.encoded_serial
-        )
-        self._log_serial('TX', f'LOGIN: {login_data.hex()}')
-        self.mnet_client.send_packet(self.DESTINATION, b'\x13\xa1', login_data)
+        self._log_serial('TX', 'LOGIN')
+        self.mnet_client.login(self.DESTINATION)
         time.sleep(self.INTER_REQUEST_DELAY)
     
     def _execute_pending_command(self):

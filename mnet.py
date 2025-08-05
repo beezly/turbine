@@ -62,6 +62,7 @@ class Mnet:
     REQ_DATA = b'\x0c\x28'
     REQ_COMMAND = b'\x0c\x32'
     REQ_SERIAL_NUMBER = b'\x0c\x2e'
+    REQ_LOGIN = b'\x13\xa1'
     
     # Login constants
     LOGIN_131_GAIA_WIND = b'\x31\x33\x31\x20\x66\x6b\x59\x75\x29\x29\x31\x32\x32\x32\x31\x51\x51\x61\x61\x00'
@@ -340,6 +341,12 @@ class Mnet:
             return [(struct.pack('!H', mainid), subid, value) for mainid, subid, (_, value) in results]
         else:
             return [value for _, _, (_, value) in results]
+    
+    def login(self, destination: bytes) -> MnetPacket:
+        """Perform login to device."""
+        self._ensure_serial_available(destination)
+        login_data = self.encode(self.create_login_packet_data(), self.encoded_serial)
+        return self.send_packet(destination, self.REQ_LOGIN, login_data)
     
     def timestamp_to_datetime(self, timestamp: int) -> datetime.datetime:
         """Convert timestamp to datetime (epoch: 1980-01-01)."""
