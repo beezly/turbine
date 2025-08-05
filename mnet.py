@@ -123,6 +123,7 @@ class Mnet:
         self.serial: Optional[int] = None
         self.encoded_serial: Optional[bytearray] = None
         self._log_callback = None
+        self.time_offset: Optional[datetime.timedelta] = None
     
     def create_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Create an Mnet packet."""
@@ -224,7 +225,7 @@ class Mnet:
                 raw_data, = struct.unpack_from('!H', data_in, 5)
             case 0x5:
                 raw_data, = struct.unpack_from('!l', data_in, 5)
-            case 0x6:
+            case 0x6: # timestamp - fix up later to normalise to datetime
                 raw_data, = struct.unpack_from('!L', data_in, 5)
             case 0x7:
                 raw_data, = struct.unpack_from('!L', data_in, 5)
@@ -247,6 +248,9 @@ class Mnet:
             case 0x4:
                 value = float(raw_data) * pow(10, conversion_value)
         
+        if data_type == 6:
+          value = self.timestamp_to_datetime(value)
+
         return data_type, value
     
     def _extract_raw_data(self, data_type: int, data_in: bytes, length: int) -> Union[int, str, None]:
@@ -333,7 +337,39 @@ class Mnet:
         if self.serial is None:
             self.serial, serial_bytes = self.get_serial_number(destination)
             self.encoded_serial = self.encode_serial(serial_bytes)
+            # Initialize time offset on first connection
+            self._initialize_time_offset(destination)
     
+    def _initialize_time_offset(self, destination: bytes) -> None:
+        """Initialize time offset between controller and real time."""
+        try:
+            controller_time = self.get_controller_time(destination, False)
+            real_time = datetime.datetime.now(datetime.timezone.utc)            
+            self.time_offset = controller_time - real_time
+            
+            # Log time offset to debug
+            if hasattr(self, '_debug_callback'):
+                self._debug_callback({
+                    'request_data_id': 'TIME_OFFSET',
+                    'request_sub_id': 0,
+                    'response_mainid': 0,
+                    'response_subid': 0,
+                    'data_type': 'offset',
+                    'value': f'Controller: {controller_time}, Real: {real_time}, Offset: {self.time_offset}',
+                    'decoded_hex': 'time_offset_init'
+                })
+        except Exception as e:
+            self.time_offset = None
+            if hasattr(self, '_debug_callback'):
+                self._debug_callback({
+                    'request_data_id': 'TIME_OFFSET',
+                    'request_sub_id': 0,
+                    'response_mainid': 0,
+                    'response_subid': 0, 
+                    'data_type': 'error',
+                    'value': f'Error initializing time offset: {str(e)}',
+                    'decoded_hex': 'time_offset_error'
+                })    
     def send_command(self, destination: bytes, command_id: bytes) -> MnetPacket:
         """Send command to device."""
         self._ensure_serial_available(destination)
@@ -371,6 +407,21 @@ class Mnet:
         
         results = self.decode_multiple_data(decoded_data)
         
+        # Log debug responses
+        if hasattr(self, '_debug_callback'):
+            for i, (mainid, subid, (data_type, value)) in enumerate(results):
+                req_data_id = datasubids[i][0].hex() if i < len(datasubids) else 'unknown'
+                req_sub_id = datasubids[i][1] if i < len(datasubids) else 'unknown'
+                self._debug_callback({
+                    'request_data_id': req_data_id,
+                    'request_sub_id': req_sub_id,
+                    'response_mainid': mainid,
+                    'response_subid': subid,
+                    'data_type': data_type,
+                    'value': value,
+                    'decoded_hex': decoded_data.hex()
+                })
+        
         if include_ids:
             return [(struct.pack('!H', mainid), subid, value) for mainid, subid, (_, value) in results]
         else:
@@ -382,7 +433,28 @@ class Mnet:
         login_data = self.encode(self.create_login_packet_data(), self.encoded_serial)
         return self.send_packet(destination, self.REQ_LOGIN, login_data)
     
-    def timestamp_to_datetime(self, timestamp: int) -> datetime.datetime:
+    def get_controller_time(self, destination: bytes, adjust: bool = True) -> datetime.datetime:
+        """Get controller time and convert to datetime."""
+        timestamp = self.request_data(destination, self.DATA_ID_CONTROLLER_TIME, 0)
+        # Parse timestamp string in format YYMMDDHHmmSS as UTC
+        dt = datetime.datetime.strptime(timestamp, "%y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)        
+        if adjust and self.time_offset is not None:
+            try:
+                dt += self.time_offset
+            except OverflowError:
+                pass
+        return dt    
+    
+    def timestamp_to_datetime(self, timestamp: int, adjust: bool = True) -> datetime.datetime:
         """Convert timestamp to datetime (epoch: 1980-01-01)."""
-        epoch = datetime.datetime(1980, 1, 1)
-        return epoch + datetime.timedelta(seconds=timestamp)
+        epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
+        dt = epoch + datetime.timedelta(seconds=timestamp)
+        
+        if adjust and self.time_offset is not None:
+            try:
+                dt += self.time_offset
+            except OverflowError:
+                # Return unadjusted datetime if offset causes overflow
+                pass
+        
+        return dt
