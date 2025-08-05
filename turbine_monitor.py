@@ -36,6 +36,7 @@ class TurbineMonitor:
         self.mqtt_host = mqtt_host
         self.web_port = web_port
         self.pending_command: Optional[bytes] = None
+        self.last_time_offset_update: Optional[datetime] = None
         self.logger = self._setup_logging()
         
         # Monitoring data
@@ -88,6 +89,10 @@ class TurbineMonitor:
         def handle_toggle_debug(enabled):
             # Debug toggle handled on client side
             pass
+        
+        @self.socketio.on('command')
+        def handle_command(command):
+            self._handle_socket_command(command)
     
     def _log_mqtt(self, direction: str, topic: str, payload: str):
         """Log MQTT activity."""
@@ -112,16 +117,16 @@ class TurbineMonitor:
     
     def _log_serial_hex(self, direction: str, hex_data: str, decoded: str):
         """Log serial activity with hex and decoded data."""
-        # Convert hex to ASCII
-        try:
-            ascii_data = bytes.fromhex(hex_data).decode('ascii', errors='replace')
-        except:
-            ascii_data = 'N/A'
+        # Abbreviate hex data to max 32 characters
+        abbreviated_hex = hex_data[:32] + ('...' if len(hex_data) > 32 else '')
+        
+        # Abbreviate decoded data
+        abbreviated_decoded = decoded[:16] + ('...' if len(decoded) > 16 else '')
         
         entry = {
             'timestamp': datetime.now().isoformat(),
             'direction': direction,
-            'data': f'HEX: {hex_data} | ASCII: {ascii_data} | {decoded}'
+            'data': f'HEX: {abbreviated_hex} | {abbreviated_decoded}'
         }
         self.serial_log.append(entry)
         self.socketio.emit('serial_log', entry)
@@ -176,7 +181,8 @@ class TurbineMonitor:
             command_map = {
                 'start': mnet.Mnet.DATA_ID_START,
                 'stop': mnet.Mnet.DATA_ID_STOP,
-                'reset': mnet.Mnet.DATA_ID_RESET
+                'reset': mnet.Mnet.DATA_ID_RESET,
+                'manual_start': mnet.Mnet.DATA_ID_MANUAL_START
             }
             
             if command in command_map:
@@ -187,6 +193,29 @@ class TurbineMonitor:
                 
         except Exception as e:
             self.logger.error(f"Error handling command: {e}")
+            self.logger.error(traceback.format_exc())
+    
+    def _handle_socket_command(self, command: str):
+        """Handle incoming socket command from web UI."""
+        try:
+            command = command.strip().lower()
+            self.logger.info(f"Received socket command: {command}")
+            
+            command_map = {
+                'start': mnet.Mnet.DATA_ID_START,
+                'stop': mnet.Mnet.DATA_ID_STOP,
+                'reset': mnet.Mnet.DATA_ID_RESET,
+                'manual_start': mnet.Mnet.DATA_ID_MANUAL_START
+            }
+            
+            if command in command_map:
+                self.pending_command = command_map[command]
+                self.logger.info(f"Queued socket command: {command}")
+            else:
+                self.logger.warning(f"Unknown socket command: {command}")
+                
+        except Exception as e:
+            self.logger.error(f"Error handling socket command: {e}")
             self.logger.error(traceback.format_exc())
     
     def _clear_serial_buffers(self):
@@ -222,8 +251,16 @@ class TurbineMonitor:
     
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
-        # Current values request
-        current_requests = [
+        # Update time offset once per 24 hours
+        now = datetime.now()
+        if (self.last_time_offset_update is None or 
+            (now - self.last_time_offset_update).total_seconds() >= 86400):
+            self.mnet_client.update_time_offset(self.DESTINATION)
+            self.last_time_offset_update = now
+            self.logger.info("Updated time offset")
+        
+        # Combined request for all data
+        all_requests = [
             (mnet.Mnet.DATA_ID_WIND_SPEED, mnet.Mnet.DATA_AVERAGING_CURRENT),
             (mnet.Mnet.DATA_ID_ROTOR_REVS, mnet.Mnet.DATA_AVERAGING_CURRENT),
             (mnet.Mnet.DATA_ID_GEN_REVS, mnet.Mnet.DATA_AVERAGING_CURRENT),
@@ -236,52 +273,43 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 0),
             (mnet.Mnet.DATA_ID_CONTROLLER_TIME, 0),
             (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 0),
-            (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 1)
-            
-        ]
-        
-        # 1-minute averages request
-        avg_requests = [
-            (mnet.Mnet.DATA_ID_GRID_POWER, mnet.Mnet.DATA_AVERAGING_1MIN),
+            (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 1),
+            (mnet.Mnet.DATA_ID_GRID_POWER, mnet.Mnet.DATA_AVERAGING_10MIN),
             (mnet.Mnet.DATA_ID_L1V, mnet.Mnet.DATA_AVERAGING_1MIN),
             (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_1MIN),
             (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN)
         ]
         
-        self._log_serial('TX', 'REQ: CURRENT_DATA')
-        current_results = self.mnet_client.request_multiple_data(self.DESTINATION, current_requests)
-        
-        self._log_serial('TX', 'REQ: 1MIN_AVERAGES')
-        avg_results = self.mnet_client.request_multiple_data(self.DESTINATION, avg_requests)
+        results = self.mnet_client.request_multiple_data(self.DESTINATION, all_requests)
         
         data = {
-            'wind_speed_mps': current_results[0],
-            'rotor_rpm': current_results[1],
-            'generator_rpm': current_results[2],
-            'power_W': current_results[3],
-            'l1v': current_results[4],
-            'l2v': current_results[5],
-            'l3v': current_results[6],
-            'status_message': current_results[7].strip() if isinstance(current_results[7], str) else str(current_results[7]).strip(),
-            'event_stack_2': current_results[7],
-            'event_stack_1': current_results[8],
-            'event_stack_0': current_results[9],
-            'controller_time': current_results[10],
+            'wind_speed_mps': results[0],
+            'rotor_rpm': results[1],
+            'generator_rpm': results[2],
+            'power_W': results[3],
+            'l1v': results[4],
+            'l2v': results[5],
+            'l3v': results[6],
+            'status_message': results[7].strip() if isinstance(results[7], str) else str(results[7]).strip(),
+            'event_stack_2': results[7],
+            'event_stack_1': results[8],
+            'event_stack_0': results[9],
+            'controller_time': results[10],
             'time_offset': str(self.mnet_client.time_offset) if self.mnet_client.time_offset else 'None',
-            'current_status_code_0': current_results[11],
-            'current_status_code_1': current_results[12],
+            'current_status_code_0': results[11],
+            'current_status_code_1': results[12],
             # 1-minute averages
-            'power_W_1min': avg_results[0],
-            'l1v_1min': avg_results[1],
-            'l2v_1min': avg_results[2],
-            'l3v_1min': avg_results[3]
+            'power_W_10min': results[13],
+            'l1v_1min': results[14],
+            'l2v_1min': results[15],
+            'l3v_1min': results[16]
         }
         
         # Safe formatting for None values
         def safe_format(val, fmt):
             return f'{val:{fmt}}' if val is not None else 'None'
         
-        self._log_serial('RX', f'ALL_DATA: Wind={safe_format(data["wind_speed_mps"], ".1f")}, Power={safe_format(data["power_W"], ".0f")}W (1min:{safe_format(data["power_W_1min"], ".0f")}W), RPM={safe_format(data["rotor_rpm"], ".0f")}/{safe_format(data["generator_rpm"], ".0f")}, V={safe_format(data["l1v"], ".0f")}/{safe_format(data["l2v"], ".0f")}/{safe_format(data["l3v"], ".0f")}')
+
         
         return data
     
@@ -321,11 +349,11 @@ class TurbineMonitor:
         web_thread.start()
         self.logger.info(f"Web interface started on port {self.web_port}")
         
+        # Login to turbine
+        self._login_to_turbine()
+
         while True:
             try:
-                # Login to turbine
-                self._login_to_turbine()
-                
                 # Execute any pending commands
                 self._execute_pending_command()
                 

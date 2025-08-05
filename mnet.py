@@ -106,7 +106,13 @@ class Mnet:
     DATA_COMMAND_START = b'\x00\x01'
     DATA_COMMAND_STOP = b'\x00\x02'
     DATA_COMMAND_RESET = b'\x00\x03'
-    DATA_COMMAND_MANUAL_START = b'\x00x04'
+    DATA_COMMAND_MANUAL_START = b'\x00\x04'
+    
+    # Command aliases for backward compatibility
+    DATA_ID_START = DATA_COMMAND_START
+    DATA_ID_STOP = DATA_COMMAND_STOP
+    DATA_ID_RESET = DATA_COMMAND_RESET
+    DATA_ID_MANUAL_START = DATA_COMMAND_MANUAL_START
     
     # Legacy inner class for backward compatibility
     MnetPacket = MnetPacket
@@ -400,10 +406,11 @@ class Mnet:
         response = self.send_packet(destination, self.REQ_MULTIPLE_DATA, request_data)
         decoded_data = self.decode(response.data, self.encoded_serial)
         
-        # Log decrypted data
-        if hasattr(self, '_log_callback'):
-            ascii_data = decoded_data.decode('ascii', errors='replace')
-            self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {ascii_data}')
+        # Log decrypted data (commented out to reduce serial log clutter)
+        # if hasattr(self, '_log_callback'):
+        #     ascii_data = decoded_data.decode('ascii', errors='replace')
+        #     abbreviated_ascii = ascii_data[:16] + ('...' if len(ascii_data) > 16 else '')
+        #     self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {abbreviated_ascii}')
         
         results = self.decode_multiple_data(decoded_data)
         
@@ -444,6 +451,10 @@ class Mnet:
             except OverflowError:
                 pass
         return dt    
+    
+    def update_time_offset(self, destination: bytes) -> None:
+        """Update time offset between controller and real time."""
+        self._initialize_time_offset(destination)
     
     def timestamp_to_datetime(self, timestamp: int, adjust: bool = True) -> datetime.datetime:
         """Convert timestamp to datetime (epoch: 1980-01-01)."""
