@@ -42,6 +42,7 @@ class TurbineMonitor:
         self.latest_data = {}
         self.mqtt_log = deque(maxlen=100)
         self.serial_log = deque(maxlen=100)
+        self.debug_log = deque(maxlen=100)
         self.status = {'connected': False, 'last_update': None}
         
         # Web server
@@ -53,6 +54,7 @@ class TurbineMonitor:
         self.serial_device = serial.Serial(port=serial_port, baudrate=38400, timeout=2)
         self.mnet_client = mnet.Mnet(self.serial_device)
         self.mnet_client._log_callback = self._log_serial_hex
+        self.mnet_client._debug_callback = self._log_debug_response
         self.mqtt_client = self._setup_mqtt()
         
         # Get turbine serial number
@@ -81,6 +83,11 @@ class TurbineMonitor:
         def handle_connect():
             emit('status', self.status)
             emit('data', self.latest_data)
+        
+        @self.socketio.on('toggle_debug')
+        def handle_toggle_debug(enabled):
+            # Debug toggle handled on client side
+            pass
     
     def _log_mqtt(self, direction: str, topic: str, payload: str):
         """Log MQTT activity."""
@@ -118,6 +125,32 @@ class TurbineMonitor:
         }
         self.serial_log.append(entry)
         self.socketio.emit('serial_log', entry)
+    
+    def _log_debug_response(self, debug_data):
+        """Log debug response data."""
+        # Convert any datetime objects to strings for JSON serialization
+        serializable_data = {}
+        for key, value in debug_data.items():
+            if isinstance(value, datetime):
+                serializable_data[key] = value.isoformat()
+            else:
+                serializable_data[key] = value
+        
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            **serializable_data
+        }
+        self.debug_log.append(entry)
+        self.socketio.emit('debug_response', entry)
+        
+        # Log to console
+        req_id = serializable_data.get('request_data_id', 'unknown')
+        req_sub = serializable_data.get('request_sub_id', 'unknown')
+        resp_main = serializable_data.get('response_mainid', 'unknown')
+        resp_sub = serializable_data.get('response_subid', 'unknown')
+        value = serializable_data.get('value', 'unknown')
+        data_type = serializable_data.get('data_type', 'unknown')
+        self.logger.info(f"DEBUG: REQ[{req_id}:{req_sub}] -> RSP[{resp_main}:{resp_sub}] = {value} (type:{data_type})")
     
     def _setup_mqtt(self) -> mqtt.Client:
         """Setup MQTT client."""
@@ -201,7 +234,9 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2),
             (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 1),
             (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 0),
-            (mnet.Mnet.DATA_ID_CONTROLLER_TIME, 0)
+            (mnet.Mnet.DATA_ID_CONTROLLER_TIME, 0),
+            (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 0),
+            (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 1)
             
         ]
         
@@ -232,6 +267,9 @@ class TurbineMonitor:
             'event_stack_1': current_results[8],
             'event_stack_0': current_results[9],
             'controller_time': current_results[10],
+            'time_offset': str(self.mnet_client.time_offset) if self.mnet_client.time_offset else 'None',
+            'current_status_code_0': current_results[11],
+            'current_status_code_1': current_results[12],
             # 1-minute averages
             'power_W_1min': avg_results[0],
             'l1v_1min': avg_results[1],
@@ -249,21 +287,27 @@ class TurbineMonitor:
     
     def _publish_data(self, data: Dict[str, Any]):
         """Publish data to MQTT."""
+        # Convert datetime objects to strings for JSON serialization
+        serializable_data = {}
+        for key, value in data.items():
+            if isinstance(value, datetime):
+                serializable_data[key] = value.isoformat()
+            else:
+                serializable_data[key] = value
+        
         topic = f"{self.TOPIC_PREFIX}{self.serial_number}"
-        payload = json.dumps(data)
+        payload = json.dumps(serializable_data)
         
         result = self.mqtt_client.publish(topic, payload)
         result.wait_for_publish()
         
         self._log_mqtt('TX', topic, payload)
-        self.latest_data = data
+        self.latest_data = serializable_data
         self.status['last_update'] = datetime.now().isoformat()
         self.status['connected'] = True
         
-        self.socketio.emit('data', data)
+        self.socketio.emit('data', serializable_data)
         self.socketio.emit('status', self.status)
-        
-        self.logger.info(f"Published data: {data}")
     
     def run(self):
         """Main monitoring loop."""

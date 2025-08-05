@@ -32,6 +32,8 @@
         .log-data { color: #fff; }
         
         .full-width { grid-column: 1 / -1; }
+        #debugToggle, #serialToggle { background: #4CAF50; color: white; border: none; padding: 5px 10px; border-radius: 3px; cursor: pointer; }
+        #debugToggle:hover, #serialToggle:hover { background: #45a049; }
         
         @media (max-width: 768px) {
             .grid { grid-template-columns: 1fr; }
@@ -45,6 +47,7 @@
             <h1>🌪️ Wind Turbine Monitor</h1>
             <div id="status" class="status disconnected">Disconnected</div>
             <div id="lastUpdate" style="margin-top: 10px; color: #ccc;"></div>
+            <button id="mainDebugToggle" onclick="toggleDebugWindow()" style="margin-top: 10px; background: #2196F3; color: white; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer;">Show Debug</button>
         </div>
         
         <div class="grid">
@@ -83,7 +86,8 @@
                 <div style="margin-top: 20px; padding: 15px; background: #3d3d3d; border-radius: 8px;">
                     <strong>Status:</strong> <span id="statusMessage">--</span><br>
                     <strong>Event Stack:</strong> <span id="eventStack2">--</span> | <span id="eventStack1">--</span> | <span id="eventStack0">--</span><br>
-                    <strong>Controller Time:</strong> <span id="controllerTime">--</span>
+                    <strong>Controller Time:</strong> <span id="controllerTime">--</span><br>
+                    <strong>Time Offset:</strong> <span id="timeOffset">--</span>
                 </div>
             </div>
             
@@ -115,9 +119,14 @@
             </div>
         </div>
         
-        <div class="card full-width">
-            <h3>🔌 Serial Communication</h3>
+        <div class="card full-width" id="serialCard">
+            <h3>🔌 Serial Communication <button id="serialToggle" onclick="toggleSerial()">Hide</button></h3>
             <div id="serialLogs" class="logs"></div>
+        </div>
+        
+        <div class="card full-width" id="debugCard" style="display: none;">
+            <h3>🐛 Debug Responses <button id="debugToggle" onclick="toggleDebug()">Hide</button></h3>
+            <div id="debugLogs" class="logs"></div>
         </div>
     </div>
 
@@ -159,6 +168,7 @@
             document.getElementById('eventStack1').textContent = data.event_stack_1 || '--';
             document.getElementById('eventStack0').textContent = data.event_stack_0 || '--';
             document.getElementById('controllerTime').textContent = data.controller_time || '--';
+            document.getElementById('timeOffset').textContent = data.time_offset || '--';
             
             // 1-minute averages
             document.getElementById('power1min').textContent = data.power_W_1min?.toFixed(0) || '--';
@@ -172,8 +182,49 @@
         });
         
         socket.on('serial_log', function(entry) {
-            addLogEntry('serialLogs', entry, 'log-data');
+            if (serialEnabled) {
+                addLogEntry('serialLogs', entry, 'log-data');
+            }
         });
+        
+        socket.on('debug_response', function(entry) {
+            addDebugEntry(entry);
+        });
+        
+        let debugEnabled = false;
+        let serialEnabled = true;
+        
+        function toggleDebugWindow() {
+            const debugCard = document.getElementById('debugCard');
+            const toggleBtn = document.getElementById('mainDebugToggle');
+            debugEnabled = !debugEnabled;
+            
+            if (debugEnabled) {
+                debugCard.style.display = 'block';
+                toggleBtn.textContent = 'Hide Debug';
+            } else {
+                debugCard.style.display = 'none';
+                toggleBtn.textContent = 'Show Debug';
+            }
+        }
+        
+        function toggleDebug() {
+            toggleDebugWindow();
+        }
+        
+        function toggleSerial() {
+            const serialLogs = document.getElementById('serialLogs');
+            const toggleBtn = document.getElementById('serialToggle');
+            serialEnabled = !serialEnabled;
+            
+            if (serialEnabled) {
+                serialLogs.style.display = 'block';
+                toggleBtn.textContent = 'Hide';
+            } else {
+                serialLogs.style.display = 'none';
+                toggleBtn.textContent = 'Show';
+            }
+        }
         
         function addLogEntry(containerId, entry, className) {
             const container = document.getElementById(containerId);
@@ -188,6 +239,30 @@
             logEntry.innerHTML = `
                 <span class="log-timestamp">${timestamp}</span>
                 <span class="${className}">${direction}${topic}</span>
+                <span class="log-data">${content}</span>
+            `;
+            
+            container.appendChild(logEntry);
+            container.scrollTop = container.scrollHeight;
+            
+            // Keep only last 100 entries
+            while (container.children.length > 100) {
+                container.removeChild(container.firstChild);
+            }
+        }
+        
+        function addDebugEntry(entry) {
+            if (!debugEnabled) return;
+            
+            const container = document.getElementById('debugLogs');
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            
+            const timestamp = new Date(entry.timestamp).toLocaleTimeString();
+            const content = `REQ[${entry.request_data_id}:${entry.request_sub_id}] -> RSP[${entry.response_mainid}:${entry.response_subid}] = ${entry.value} (type:${entry.data_type})`;
+            
+            logEntry.innerHTML = `
+                <span class="log-timestamp">${timestamp}</span>
                 <span class="log-data">${content}</span>
             `;
             
