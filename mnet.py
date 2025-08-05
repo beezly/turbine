@@ -105,7 +105,6 @@ class Mnet:
         """
         self.device = device
         self.id = id
-        self.crc_calculator = Calculator(Crc16.XMODEM)
         self.serial: Optional[int] = None
         self.encoded_serial: Optional[bytearray] = None
     

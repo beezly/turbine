@@ -51,7 +51,9 @@ class TestCRCRegression(unittest.TestCase):
         ]
         
         for data, expected_crc in test_cases:
-            calculated_crc = mnet_instance.crc_calculator.checksum(data)
+            from crc import Calculator, Crc16
+            crc_calc = Calculator(Crc16.XMODEM)
+            calculated_crc = crc_calc.checksum(data)
             self.assertEqual(
                 calculated_crc, 
                 expected_crc,
@@ -153,7 +155,9 @@ class TestCRCReferenceValues(unittest.TestCase):
         mnet_instance = Mnet(Mock())
         
         for packet_data in reference_crcs.keys():
-            crc = mnet_instance.crc_calculator.checksum(packet_data)
+            from crc import Calculator, Crc16
+            crc_calc = Calculator(Crc16.XMODEM)
+            crc = crc_calc.checksum(packet_data)
             print(f"Reference CRC for {packet_data.hex()}: 0x{crc:04x}")
             
             # TODO: After running once, replace None values with actual CRCs

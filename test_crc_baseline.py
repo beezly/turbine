@@ -36,7 +36,9 @@ class TestCRCBaseline(unittest.TestCase):
         
         for data, expected_crc in baseline_crcs:
             with self.subTest(data=data.hex()):
-                calculated_crc = mnet_instance.crc_calculator.checksum(data)
+                from crc import Calculator, Crc16
+                crc_calc = Calculator(Crc16.XMODEM)
+                calculated_crc = crc_calc.checksum(data)
                 self.assertEqual(
                     calculated_crc, 
                     expected_crc,
@@ -75,9 +77,9 @@ class TestCRCBaseline(unittest.TestCase):
         
         # The CRC should be calculated on the full packet including escaped data
         expected_packet_data = b'\x02\x01\x0c\x28\x04\x9c\xff\xff\x43'
-        from unittest.mock import Mock
-        mnet_instance = Mnet(Mock())
-        expected_crc = mnet_instance.crc_calculator.checksum(expected_packet_data)
+        from crc import Calculator, Crc16
+        crc_calc = Calculator(Crc16.XMODEM)
+        expected_crc = crc_calc.checksum(expected_packet_data)
         
         # Store the actual CRC as baseline
         actual_crc = packet.calculated_crc
