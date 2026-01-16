@@ -380,10 +380,9 @@ class TurbineMonitor:
         with self.serial_lock:
             try:
                 remote_display = self.mnet_client.get_remote_display(self.DESTINATION)
-                # Convert to ASCII, skip first byte (padding), format as 40-char lines
+                # Convert to ASCII, format as 18-char lines (matches controller LCD)
                 display_text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in remote_display)
-                display_text = display_text[1:]  # Skip leading padding byte
-                display_lines = [display_text[i:i+40] for i in range(0, min(len(display_text), 160), 40)]
+                display_lines = [display_text[i:i+18] for i in range(0, len(display_text), 18)]
             except Exception as e:
                 self.logger.warning(f"Failed to get remote display: {e}")
                 display_lines = []

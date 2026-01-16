@@ -758,8 +758,9 @@ class Mnet:
             List of Event namedtuples, most recent first (index 0)
         """
         # 3 items per event (code, timestamp, text), chunk to stay under limit
+        # Event stack has lower batch limit (12 items max), so 4 events per chunk
         items_per_event = 3
-        events_per_chunk = self.MAX_BATCH_SIZE // items_per_event  # 5 events per chunk
+        events_per_chunk = 4
 
         events = []
         for chunk_start in range(0, limit, events_per_chunk):
