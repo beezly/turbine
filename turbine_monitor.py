@@ -376,6 +376,18 @@ class TurbineMonitor:
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
+        # Get remote display screen
+        with self.serial_lock:
+            try:
+                remote_display = self.mnet_client.get_remote_display(self.DESTINATION)
+                # Convert to ASCII, skip first byte (padding), format as 40-char lines
+                display_text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in remote_display)
+                display_text = display_text[1:]  # Skip leading padding byte
+                display_lines = [display_text[i:i+40] for i in range(0, min(len(display_text), 160), 40)]
+            except Exception as e:
+                self.logger.warning(f"Failed to get remote display: {e}")
+                display_lines = []
+
         # Combined request for all data (max ~17 items to stay within response limits)
         all_requests = [
             (mnet.Mnet.DATA_ID_WIND_SPEED, mnet.Mnet.DATA_AVERAGING_CURRENT),
@@ -424,6 +436,8 @@ class TurbineMonitor:
             # Runtime counters (in seconds)
             'runtime_1_sec': results[15] if len(results) > 15 else None,
             'runtime_2_sec': results[16] if len(results) > 16 else None,
+            # Remote display (40x4 LCD)
+            'remote_display': display_lines,
         }
 
         return data
