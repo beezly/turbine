@@ -7,7 +7,7 @@ Provides communication interface for wind turbine controllers using the Mnet pro
 import socket
 import struct
 import datetime
-from typing import Tuple, List, Union, Optional, Iterator, NamedTuple
+from typing import Tuple, List, Union, Optional, Iterator, NamedTuple, Dict
 from crc import Calculator, Crc16
 
 
@@ -248,7 +248,7 @@ class Mnet:
     
     def __init__(self, device, id: bytes = b'\x01'):
         """Initialize Mnet client.
-        
+
         Args:
             device: Serial device object
             id: Client ID bytes
@@ -259,6 +259,7 @@ class Mnet:
         self.encoded_serial: Optional[bytearray] = None
         self._log_callback = None
         self._debug_callback = None
+        self._alarm_description_cache: Dict[int, str] = {}  # Cache for alarm descriptions
     
     def create_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Create an Mnet packet."""
@@ -812,6 +813,9 @@ class Mnet:
         combines all alarm data (timestamp and description) for all known alarm
         types into a single request_multiple_data() call.
 
+        Uses cached descriptions when available (populated on first call),
+        so subsequent calls only fetch timestamps (half the requests).
+
         Args:
             destination: Target device address
             only_occurred: If True, only return alarms that have actually occurred
@@ -820,25 +824,42 @@ class Mnet:
             List of AlarmRecord namedtuples, sorted by sub_id
         """
         sub_ids = sorted(self.ALARM_SUB_IDS.keys())
+        use_cache = len(self._alarm_description_cache) >= len(sub_ids)
 
-        # Build request list: for each alarm, request timestamp and description
+        # Build request list
         requests = []
-        for sub_id in sub_ids:
-            requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
-            requests.append((self.DATA_ID_STATUS_TEXT, sub_id))
+        if use_cache:
+            # Only fetch timestamps (descriptions are cached)
+            for sub_id in sub_ids:
+                requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
+        else:
+            # Fetch both timestamps and descriptions
+            for sub_id in sub_ids:
+                requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
+                requests.append((self.DATA_ID_STATUS_TEXT, sub_id))
 
         # Execute batch request
         results = self.request_multiple_data(destination, requests)
 
-        # Parse results into AlarmRecord objects (2 results per alarm)
+        # Parse results into AlarmRecord objects
         alarms = []
         for i, sub_id in enumerate(sub_ids):
-            base_idx = i * 2
-            if base_idx + 1 >= len(results):
-                break
-
-            timestamp = results[base_idx]
-            description = results[base_idx + 1]
+            if use_cache:
+                # Results are just timestamps (1 per alarm)
+                if i >= len(results):
+                    break
+                timestamp = results[i]
+                description = self._alarm_description_cache.get(sub_id, '')
+            else:
+                # Results are timestamp+description pairs (2 per alarm)
+                base_idx = i * 2
+                if base_idx + 1 >= len(results):
+                    break
+                timestamp = results[base_idx]
+                description = results[base_idx + 1]
+                # Cache the description for future calls
+                if isinstance(description, str):
+                    self._alarm_description_cache[sub_id] = description.strip()
 
             if timestamp is None:
                 continue
