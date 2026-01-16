@@ -200,6 +200,17 @@ class Mnet:
     DATA_ID_STOP = DATA_COMMAND_STOP
     DATA_ID_RESET = DATA_COMMAND_RESET
     DATA_ID_MANUAL_START = DATA_COMMAND_MANUAL_START
+
+    # Data IDs that use data_type 6 (uint32) but should NOT be converted to datetime
+    # These return numeric values even though the protocol marks them as "timestamp" type
+    DATA_IDS_NOT_TIMESTAMP = {
+        0x9cae,  # GRID_FREQUENCY - returns Hz (e.g., 49.9)
+        0xc739,  # ERROR_COUNT - returns count
+        0xc73a,  # STOP_DUE_TO_ERROR - returns seconds (duration, not absolute time)
+        0xc79c,  # Error status mirror
+        0xc79d,  # Error count mirror (same as 0xc739)
+        0xc79e,  # Stop due to error mirror (same as 0xc73a)
+    }
     
     # Legacy inner class for backward compatibility
     MnetPacket = MnetPacket
@@ -299,11 +310,17 @@ class Mnet:
             out[i] = tmp
         return bytes(out)
     
-    def decode_data(self, data_in: bytes) -> Tuple[int, Union[float, str, None]]:
-        """Decode data value from response."""
+    def decode_data(self, data_in: bytes, data_id: Optional[int] = None) -> Tuple[int, Union[float, str, None]]:
+        """Decode data value from response.
+
+        Args:
+            data_in: Raw data bytes from response
+            data_id: Optional data ID (wire ID as int) to determine type handling.
+                     If provided and in DATA_IDS_NOT_TIMESTAMP, skips datetime conversion.
+        """
         header = data_in[0:5]
         data_type, conversion_type, conversion_value, length = struct.unpack('!BBHB', header)
-        
+
         # Original match statement with bugs preserved for compatibility
         match data_type:
             case 0x0:
@@ -327,7 +344,7 @@ class Mnet:
                 raw_data = raw_data.decode('ascii').rstrip('\x00')
             case _:
                 raise ValueError(f"Unknown data type: {data_type}")
-        
+
         # Original match statement with bugs preserved
         match conversion_type:
             case 0x0:
@@ -340,9 +357,10 @@ class Mnet:
                 value = float(raw_data) * conversion_value if conversion_value != 0 else float(raw_data)
             case 0x4:
                 value = float(raw_data) * pow(10, conversion_value)
-        
-        if data_type == 6:
-          value = self.timestamp_to_datetime(value)
+
+        # Convert to datetime only if data_type is 6 AND data_id is not in the exclusion set
+        if data_type == 6 and data_id not in self.DATA_IDS_NOT_TIMESTAMP:
+            value = self.timestamp_to_datetime(value)
 
         return data_type, value
     
@@ -394,24 +412,25 @@ class Mnet:
         """Decode multiple data elements from response."""
         if not data_in:
             return []
-        
+
         num_elements = data_in[0]
         pos = 1
         results = []
-        
+
         for _ in range(num_elements):
             if pos + 9 > len(data_in):
                 break
-            
+
             header = data_in[pos:pos+9]
             mainid, subid, _, _, _, length = struct.unpack("!HHBBHB", header)
-            
+
             next_data = data_in[pos+4:pos+9+length]
-            decoded = self.decode_data(next_data)
+            # Pass mainid to decode_data for proper type handling
+            decoded = self.decode_data(next_data, data_id=mainid)
             results.append((mainid, subid, decoded))
-            
+
             pos += 9 + length
-        
+
         return results
     
     def create_login_packet_data(self) -> bytes:
@@ -439,13 +458,15 @@ class Mnet:
     def request_data(self, destination: bytes, data_id: bytes, sub_id: int = 0) -> Union[float, str]:
         """Request single data value."""
         self._ensure_serial_available(destination)
-        
+
         request_data = data_id + sub_id.to_bytes(2, byteorder='big')
         response = self.send_packet(destination, self.REQ_DATA, request_data)
-        
+
         decoded_data = self.decode(response.data, self.encoded_serial)
-        _, value = self.decode_data(decoded_data)
-        
+        # Convert data_id bytes to int for type handling lookup
+        data_id_int = int.from_bytes(data_id, byteorder='big')
+        _, value = self.decode_data(decoded_data, data_id=data_id_int)
+
         return value
     
     def request_multiple_data(self, destination: bytes, datasubids: List[Tuple[bytes, int]], 
