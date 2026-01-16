@@ -646,6 +646,61 @@ class Mnet:
             if event is not None:
                 yield event
 
+    def get_events_batch(self, destination: bytes, limit: int = 10) -> List[Event]:
+        """Fetch multiple events from the event stack in a single batch request.
+
+        This is more efficient than calling get_event() repeatedly, as it
+        combines all event data (code, timestamp, text) for multiple events
+        into a single request_multiple_data() call.
+
+        Args:
+            destination: Target device address
+            limit: Number of events to fetch (default: 10, max: 33 due to packet size)
+
+        Returns:
+            List of Event namedtuples, most recent first (index 0)
+        """
+        # Limit batch size due to packet size constraints (3 items per event)
+        # Max ~33 events per batch (99 data items + overhead)
+        max_batch = min(limit, 33)
+
+        # Build request list: for each event, request code, timestamp, and text
+        requests = []
+        for index in range(max_batch):
+            base = index * self.EVENT_STACK_INDEX_MULTIPLIER
+            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                           base + self.EVENT_STACK_SUBID_CODE))
+            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                           base + self.EVENT_STACK_SUBID_TIMESTAMP))
+            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                           base + self.EVENT_STACK_SUBID_TEXT))
+
+        # Execute batch request
+        results = self.request_multiple_data(destination, requests)
+
+        # Parse results into Event objects (3 results per event)
+        events = []
+        for i in range(max_batch):
+            base_idx = i * 3
+            if base_idx + 2 >= len(results):
+                break
+
+            code = results[base_idx]
+            timestamp = results[base_idx + 1]
+            text = results[base_idx + 2]
+
+            if code is None:
+                continue
+
+            events.append(Event(
+                index=i,
+                code=int(code) if code is not None else 0,
+                timestamp=timestamp,
+                text=text.strip() if isinstance(text, str) else str(text)
+            ))
+
+        return events
+
     def get_alarm_record(self, destination: bytes, sub_id: int) -> Optional[AlarmRecord]:
         """Get the last occurrence record for a specific alarm type.
 
@@ -748,3 +803,59 @@ class Mnet:
                 if only_occurred and not record.has_occurred:
                     continue
                 yield record
+
+    def get_alarm_history_batch(self, destination: bytes,
+                                only_occurred: bool = False) -> List[AlarmRecord]:
+        """Fetch alarm history in a single batch request.
+
+        This is more efficient than calling get_alarm_record() repeatedly, as it
+        combines all alarm data (timestamp and description) for all known alarm
+        types into a single request_multiple_data() call.
+
+        Args:
+            destination: Target device address
+            only_occurred: If True, only return alarms that have actually occurred
+
+        Returns:
+            List of AlarmRecord namedtuples, sorted by sub_id
+        """
+        sub_ids = sorted(self.ALARM_SUB_IDS.keys())
+
+        # Build request list: for each alarm, request timestamp and description
+        requests = []
+        for sub_id in sub_ids:
+            requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
+            requests.append((self.DATA_ID_STATUS_TEXT, sub_id))
+
+        # Execute batch request
+        results = self.request_multiple_data(destination, requests)
+
+        # Parse results into AlarmRecord objects (2 results per alarm)
+        alarms = []
+        for i, sub_id in enumerate(sub_ids):
+            base_idx = i * 2
+            if base_idx + 1 >= len(results):
+                break
+
+            timestamp = results[base_idx]
+            description = results[base_idx + 1]
+
+            if timestamp is None:
+                continue
+
+            # Check if alarm has actually occurred (not the "never" sentinel date)
+            has_occurred = True
+            if hasattr(timestamp, 'year') and timestamp.year == 2032:
+                has_occurred = False
+
+            if only_occurred and not has_occurred:
+                continue
+
+            alarms.append(AlarmRecord(
+                sub_id=sub_id,
+                last_occurred=timestamp,
+                description=description.strip() if isinstance(description, str) else str(description),
+                has_occurred=has_occurred
+            ))
+
+        return alarms

@@ -273,7 +273,7 @@ class TurbineMonitor:
             self.logger.error(traceback.format_exc())
 
     def _fetch_events(self, limit: int = 10) -> list:
-        """Fetch events from the event stack.
+        """Fetch events from the event stack using batch request.
 
         Args:
             limit: Maximum number of events to fetch
@@ -285,21 +285,21 @@ class TurbineMonitor:
         with self.serial_lock:
             try:
                 self._clear_serial_buffers()
-                for event in self.mnet_client.get_events(self.DESTINATION, limit=limit):
+                # Use batch method for efficiency (single request instead of 3*limit)
+                for event in self.mnet_client.get_events_batch(self.DESTINATION, limit=limit):
                     events.append({
                         'index': event.index,
                         'code': event.code,
                         'timestamp': event.timestamp.isoformat() if event.timestamp else None,
                         'text': event.text
                     })
-                    time.sleep(0.05)  # Small delay between requests
             except Exception as e:
                 self.logger.error(f"Error fetching events: {e}")
                 self.logger.error(traceback.format_exc())
         return events
 
     def _fetch_alarm_history(self, only_occurred: bool = True) -> list:
-        """Fetch alarm history.
+        """Fetch alarm history using batch request.
 
         Args:
             only_occurred: Only return alarms that have occurred
@@ -311,14 +311,14 @@ class TurbineMonitor:
         with self.serial_lock:
             try:
                 self._clear_serial_buffers()
-                for alarm in self.mnet_client.get_alarm_history(self.DESTINATION, only_occurred=only_occurred):
+                # Use batch method for efficiency (single request instead of 2*num_alarms)
+                for alarm in self.mnet_client.get_alarm_history_batch(self.DESTINATION, only_occurred=only_occurred):
                     alarms.append({
                         'sub_id': alarm.sub_id,
                         'last_occurred': alarm.last_occurred.isoformat() if alarm.last_occurred else None,
                         'description': alarm.description,
                         'has_occurred': alarm.has_occurred
                     })
-                    time.sleep(0.05)  # Small delay between requests
             except Exception as e:
                 self.logger.error(f"Error fetching alarm history: {e}")
                 self.logger.error(traceback.format_exc())
