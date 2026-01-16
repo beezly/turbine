@@ -60,6 +60,7 @@ class Mnet:
     # Request types
     REQ_MULTIPLE_DATA = b'\x0c\x2a'
     REQ_DATA = b'\x0c\x28'
+    REQ_WRITE_DATA = b'\x0c\x2c'
     REQ_COMMAND = b'\x0c\x32'
     REQ_SERIAL_NUMBER = b'\x0c\x2e'
     REQ_LOGIN = b'\x13\xa1'
@@ -444,14 +445,48 @@ class Mnet:
         """Get controller time and convert to datetime."""
         timestamp = self.request_data(destination, self.DATA_ID_CONTROLLER_TIME, 0)
         # Parse timestamp string in format YYMMDDHHmmSS as UTC
-        dt = datetime.datetime.strptime(timestamp, "%y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)        
+        dt = datetime.datetime.strptime(timestamp, "%y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
         if adjust and self.time_offset is not None:
             try:
                 dt += self.time_offset
             except OverflowError:
                 pass
-        return dt    
-    
+        return dt
+
+    def set_controller_time(self, destination: bytes,
+                           time: Optional[datetime.datetime] = None) -> MnetPacket:
+        """Set controller time.
+
+        Args:
+            destination: Target device address
+            time: Datetime to set (defaults to current UTC time if None)
+
+        Returns:
+            Response packet from controller
+        """
+        self._ensure_serial_available(destination)
+
+        if time is None:
+            time = datetime.datetime.now(datetime.timezone.utc)
+
+        # Ensure timezone-aware datetime in UTC
+        if time.tzinfo is None:
+            time = time.replace(tzinfo=datetime.timezone.utc)
+        else:
+            time = time.astimezone(datetime.timezone.utc)
+
+        # Convert to seconds since 1980-01-01 epoch
+        epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
+        timestamp = int((time - epoch).total_seconds())
+
+        # Build write data payload: data_id (2 bytes) + sub_id (2 bytes) + value (4 bytes)
+        # Sub-ID 0x0001 is used for write operations
+        write_data = (self.DATA_ID_CONTROLLER_TIME +
+                     struct.pack('!H', 1) +  # sub_id = 0x0001
+                     struct.pack('!I', timestamp))
+
+        return self.send_packet(destination, self.REQ_WRITE_DATA, write_data)
+
     def update_time_offset(self, destination: bytes) -> None:
         """Update time offset between controller and real time."""
         self._initialize_time_offset(destination)

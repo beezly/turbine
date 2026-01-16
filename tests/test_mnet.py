@@ -316,12 +316,72 @@ class TestMnet(unittest.TestCase):
 
         expected = datetime.datetime(1980, 1, 2, tzinfo=datetime.timezone.utc)  # 1 day after 1980-01-01
         self.assertEqual(result, expected)
-            
+
+    def test_set_controller_time(self):
+        """Test setting controller time."""
+        mnet_instance = Mnet(self.mock_serial)
+
+        # Mock serial number retrieval
+        mnet_instance.serial = 12345678
+        mnet_instance.encoded_serial = bytearray([1, 2, 3, 4, 5])
+
+        mock_response = Mock()
+        with patch.object(mnet_instance, 'send_packet', return_value=mock_response) as mock_send:
+            # Test with specific datetime
+            test_time = datetime.datetime(2026, 1, 16, 18, 20, 13, tzinfo=datetime.timezone.utc)
+            result = mnet_instance.set_controller_time(b'\x02', test_time)
+
+            self.assertEqual(result, mock_response)
+
+            # Verify send_packet was called with correct parameters
+            mock_send.assert_called_once()
+            call_args = mock_send.call_args
+            self.assertEqual(call_args[0][0], b'\x02')  # destination
+            self.assertEqual(call_args[0][1], Mnet.REQ_WRITE_DATA)  # packet type
+
+            # Verify payload structure: data_id (2) + sub_id (2) + timestamp (4)
+            payload = call_args[0][2]
+            self.assertEqual(len(payload), 8)
+            self.assertEqual(payload[:2], Mnet.DATA_ID_CONTROLLER_TIME)
+            self.assertEqual(payload[2:4], b'\x00\x01')  # sub_id = 0x0001
+
+            # Verify timestamp calculation (seconds since 1980-01-01)
+            epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
+            expected_timestamp = int((test_time - epoch).total_seconds())
+            actual_timestamp = struct.unpack('!I', payload[4:8])[0]
+            self.assertEqual(actual_timestamp, expected_timestamp)
+
+    def test_set_controller_time_default(self):
+        """Test setting controller time with default (current) time."""
+        mnet_instance = Mnet(self.mock_serial)
+
+        mnet_instance.serial = 12345678
+        mnet_instance.encoded_serial = bytearray([1, 2, 3, 4, 5])
+
+        mock_response = Mock()
+        with patch.object(mnet_instance, 'send_packet', return_value=mock_response) as mock_send:
+            # Test with no time argument (should use current time)
+            before_call = datetime.datetime.now(datetime.timezone.utc)
+            result = mnet_instance.set_controller_time(b'\x02')
+            after_call = datetime.datetime.now(datetime.timezone.utc)
+
+            self.assertEqual(result, mock_response)
+
+            # Verify the timestamp is reasonable (within the call window)
+            payload = mock_send.call_args[0][2]
+            actual_timestamp = struct.unpack('!I', payload[4:8])[0]
+
+            epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
+            min_expected = int((before_call - epoch).total_seconds())
+            max_expected = int((after_call - epoch).total_seconds())
+            self.assertGreaterEqual(actual_timestamp, min_expected)
+            self.assertLessEqual(actual_timestamp, max_expected)
+
     def test_constants(self):
         """Test that all required constants are defined."""
         constants = [
             'SOH', 'EOT', 'MAX_PACKET_SIZE', 'REQ_MULTIPLE_DATA', 'REQ_DATA',
-            'REQ_COMMAND', 'REQ_SERIAL_NUMBER', 'LOGIN_131_GAIA_WIND', 'LOGIN_PACKET_ID',
+            'REQ_WRITE_DATA', 'REQ_COMMAND', 'REQ_SERIAL_NUMBER', 'LOGIN_131_GAIA_WIND', 'LOGIN_PACKET_ID',
             'DATA_ID_WIND_SPEED', 'DATA_ID_GEN_REVS', 'DATA_ID_ROTOR_REVS',
             'DATA_ID_L1V', 'DATA_ID_L2V', 'DATA_ID_L3V', 'DATA_ID_L1A', 'DATA_ID_L2A', 'DATA_ID_L3A',
             'DATA_ID_SYSTEM_PRODUCTION', 'DATA_ID_G1_PRODUCTION', 'DATA_ID_CONTROLLER_TIME',
