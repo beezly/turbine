@@ -1114,23 +1114,30 @@ Data records (0x30 = 48 bytes each) contain:
 
 **Data Type Conversion (from FUN_1010_72d8):**
 
-| Type Code | Format | Description |
-|-----------|--------|-------------|
-| 1, 2 | uint8 → float | Single byte value |
-| 3 | int16 → float | Signed 16-bit |
-| 4 | uint16 → float | Unsigned 16-bit |
-| 5, 6 | int32 → float | Signed 32-bit |
-| 7 | float32 | IEEE 754 float |
-| 10 | uint8 → float | Single byte value |
+Note: The table below shows the decompiled Windows client spec vs actual turbine behavior.
+
+| Type Code | Decompiled Spec | Actual Implementation | Notes |
+|-----------|-----------------|----------------------|-------|
+| 1, 2 | uint8 → float | int8 → float | Signed byte in practice |
+| 3 | int16 → float | int16 → float | Correct |
+| 4 | uint16 → float | uint16 → float | Correct |
+| 5 | int32 → float | int32 → float | Correct |
+| 6 | int32 → float | uint32 → float | Timestamps (positive since 1980) |
+| 7 | float32 | uint32 → float | Not IEEE 754 in practice |
+| 10 | uint8 → float | int8 → float | Same as type 1/2 |
 
 **Scaling Operations:**
 
-| Op Code | Operation | Description |
-|---------|-----------|-------------|
-| 1 | value / scale | Division by float scale |
-| 2 | value / scale | Division by integer scale |
-| 4 | value * scale | Multiplication by integer |
-| 5 | value * scale | Multiplication by float |
+Note: Decompiled spec differs from actual behavior for some operations.
+
+| Op Code | Decompiled Spec | Actual Implementation | Notes |
+|---------|-----------------|----------------------|-------|
+| 0 | no conversion | no conversion | Pass-through |
+| 1 | value / scale | value / 10^scale | Scale is exponent |
+| 2 | value / scale | value / scale | Direct division |
+| 3 | value * scale | value * scale | Direct multiplication |
+| 4 | value * scale | value * 10^scale | Scale is exponent |
+| 5 | value * scale | value / 10^scale | Division, not multiplication! |
 
 ### Message Types 15-18: Alarm Data
 
