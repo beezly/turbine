@@ -315,7 +315,96 @@ class Mnet:
         response = self.send_packet(destination, self.REQ_SERIAL_NUMBER, b'')
         serial, = struct.unpack('!L', response.data)
         return serial, response.data
-    
+
+    # Remote display packet types
+    REQ_DISPLAY_INFO = b'\x0c\x04'    # Returns controller version info
+    REQ_DISPLAY_SCREEN = b'\x0c\x05'  # Returns current screen content
+
+    def get_remote_display_info(self, destination: bytes) -> str:
+        """Get remote display controller info (version/revision).
+
+        Args:
+            destination: Target device address
+
+        Returns:
+            Controller version string (e.g., "Rev.1:P00515/090219")
+        """
+        self._ensure_serial_available(destination)
+        response = self.send_packet(destination, self.REQ_DISPLAY_INFO, b'')
+        decoded = self.decode(response.data, self.encoded_serial)
+        try:
+            text = decoded.decode('ascii', errors='replace')
+            return text.strip().replace('\x00', ' ').strip()
+        except Exception:
+            return decoded.hex()
+
+    def get_remote_display(self, destination: bytes) -> bytes:
+        """Get remote display screen data (raw decrypted bytes).
+
+        Retrieves the screen buffer from the turbine controller.
+
+        Args:
+            destination: Target device address
+
+        Returns:
+            Decrypted screen buffer bytes
+        """
+        self._ensure_serial_available(destination)
+        response = self.send_packet(destination, self.REQ_DISPLAY_SCREEN, b'')
+        return self.decode(response.data, self.encoded_serial)
+
+    def get_remote_display_text(self, destination: bytes) -> List[str]:
+        """Get remote display as text lines.
+
+        The display buffer is ~138 bytes with this approximate structure:
+        - Bytes 0-19: Timestamp (DD-MM-YY HH:MM:SS)
+        - Bytes 20-31: Generator indicator
+        - Bytes 32-79: Operational data (power, wind, RPM, status)
+        - Bytes 80-111: Padding
+        - Bytes 112+: Operating mode
+
+        Args:
+            destination: Target device address
+
+        Returns:
+            List of non-empty text lines from the display
+        """
+        data = self.get_remote_display(destination)
+
+        # Decode as ASCII, replacing non-printable chars with spaces
+        text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in data)
+
+        # Split into logical sections and clean up
+        # The data seems to be ~34-35 char lines based on content analysis
+        lines = []
+        # Try splitting by detecting natural boundaries in the data
+        # Use 34-char lines which aligns reasonably well
+        for i in range(0, len(text), 34):
+            line = text[i:i + 34].strip()
+            if line:
+                lines.append(line)
+
+        return lines
+
+    def get_remote_display_parsed(self, destination: bytes) -> dict:
+        """Get remote display data parsed into fields.
+
+        Args:
+            destination: Target device address
+
+        Returns:
+            Dictionary with parsed display fields
+        """
+        data = self.get_remote_display(destination)
+        text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in data)
+
+        return {
+            'raw': text,
+            'raw_bytes': len(data),
+            'timestamp': text[1:20].strip() if len(text) > 20 else '',
+            'full_text': ' '.join(text.split()),  # Collapse whitespace
+        }
+
     def encode_serial(self, serial_bytes: bytes) -> bytearray:
         """Encode serial number for encryption."""
         p0, p1, p2, p3 = struct.unpack('!BBBB', serial_bytes)
