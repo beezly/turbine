@@ -54,6 +54,7 @@ class TurbineMonitor:
         self.serial_log = deque(maxlen=100)
         self.debug_log = deque(maxlen=100)
         self.status = {'connected': False, 'last_update': None}
+        self.serial_lock = threading.Lock()  # Prevent concurrent serial access
 
         # Web server
         self.app = Flask(__name__)
@@ -281,19 +282,20 @@ class TurbineMonitor:
             List of event dictionaries
         """
         events = []
-        try:
-            self._clear_serial_buffers()
-            for event in self.mnet_client.get_events(self.DESTINATION, limit=limit):
-                events.append({
-                    'index': event.index,
-                    'code': event.code,
-                    'timestamp': event.timestamp.isoformat() if event.timestamp else None,
-                    'text': event.text
-                })
-                time.sleep(0.05)  # Small delay between requests
-        except Exception as e:
-            self.logger.error(f"Error fetching events: {e}")
-            self.logger.error(traceback.format_exc())
+        with self.serial_lock:
+            try:
+                self._clear_serial_buffers()
+                for event in self.mnet_client.get_events(self.DESTINATION, limit=limit):
+                    events.append({
+                        'index': event.index,
+                        'code': event.code,
+                        'timestamp': event.timestamp.isoformat() if event.timestamp else None,
+                        'text': event.text
+                    })
+                    time.sleep(0.05)  # Small delay between requests
+            except Exception as e:
+                self.logger.error(f"Error fetching events: {e}")
+                self.logger.error(traceback.format_exc())
         return events
 
     def _fetch_alarm_history(self, only_occurred: bool = True) -> list:
@@ -306,19 +308,20 @@ class TurbineMonitor:
             List of alarm record dictionaries
         """
         alarms = []
-        try:
-            self._clear_serial_buffers()
-            for alarm in self.mnet_client.get_alarm_history(self.DESTINATION, only_occurred=only_occurred):
-                alarms.append({
-                    'sub_id': alarm.sub_id,
-                    'last_occurred': alarm.last_occurred.isoformat() if alarm.last_occurred else None,
-                    'description': alarm.description,
-                    'has_occurred': alarm.has_occurred
-                })
-                time.sleep(0.05)  # Small delay between requests
-        except Exception as e:
-            self.logger.error(f"Error fetching alarm history: {e}")
-            self.logger.error(traceback.format_exc())
+        with self.serial_lock:
+            try:
+                self._clear_serial_buffers()
+                for alarm in self.mnet_client.get_alarm_history(self.DESTINATION, only_occurred=only_occurred):
+                    alarms.append({
+                        'sub_id': alarm.sub_id,
+                        'last_occurred': alarm.last_occurred.isoformat() if alarm.last_occurred else None,
+                        'description': alarm.description,
+                        'has_occurred': alarm.has_occurred
+                    })
+                    time.sleep(0.05)  # Small delay between requests
+            except Exception as e:
+                self.logger.error(f"Error fetching alarm history: {e}")
+                self.logger.error(traceback.format_exc())
         return alarms
 
     def _clear_serial_buffers(self):
@@ -333,40 +336,43 @@ class TurbineMonitor:
     
     def _login_to_turbine(self):
         """Perform login to turbine."""
-        self._clear_serial_buffers()
-        self._log_serial('TX', 'LOGIN')
-        self.mnet_client.login(self.DESTINATION)
-        time.sleep(self.INTER_REQUEST_DELAY)
+        with self.serial_lock:
+            self._clear_serial_buffers()
+            self._log_serial('TX', 'LOGIN')
+            self.mnet_client.login(self.DESTINATION)
+            time.sleep(self.INTER_REQUEST_DELAY)
     
     def _execute_pending_command(self):
         """Execute any pending command."""
         if self.pending_command:
-            try:
-                self._clear_serial_buffers()
-                self.logger.info(f"Executing command: {self.pending_command}")
-                result = self.mnet_client.send_command(self.DESTINATION, self.pending_command)
-                self.logger.info(f"Command result: {result}")
-                time.sleep(self.INTER_REQUEST_DELAY)
-            except Exception as e:
-                self.logger.error(f"Command execution failed: {e}")
-                self.logger.error(traceback.format_exc())
-            finally:
-                self.pending_command = None
+            with self.serial_lock:
+                try:
+                    self._clear_serial_buffers()
+                    self.logger.info(f"Executing command: {self.pending_command}")
+                    result = self.mnet_client.send_command(self.DESTINATION, self.pending_command)
+                    self.logger.info(f"Command result: {result}")
+                    time.sleep(self.INTER_REQUEST_DELAY)
+                except Exception as e:
+                    self.logger.error(f"Command execution failed: {e}")
+                    self.logger.error(traceback.format_exc())
+                finally:
+                    self.pending_command = None
 
     def _sync_controller_time(self):
         """Sync controller time to current UTC if interval has elapsed."""
         now = datetime.now()
         if (self.last_time_sync is None or
             (now - self.last_time_sync).total_seconds() >= self.TIME_SYNC_INTERVAL):
-            try:
-                self._clear_serial_buffers()
-                self.logger.info("Syncing controller time to UTC")
-                self.mnet_client.set_controller_time(self.DESTINATION)
-                self.last_time_sync = now
-                self.logger.info("Controller time synced successfully")
-            except Exception as e:
-                self.logger.error(f"Failed to sync controller time: {e}")
-                self.logger.error(traceback.format_exc())
+            with self.serial_lock:
+                try:
+                    self._clear_serial_buffers()
+                    self.logger.info("Syncing controller time to UTC")
+                    self.mnet_client.set_controller_time(self.DESTINATION)
+                    self.last_time_sync = now
+                    self.logger.info("Controller time synced successfully")
+                except Exception as e:
+                    self.logger.error(f"Failed to sync controller time: {e}")
+                    self.logger.error(traceback.format_exc())
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
@@ -389,7 +395,8 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN)
         ]
 
-        results = self.mnet_client.request_multiple_data(self.DESTINATION, all_requests)
+        with self.serial_lock:
+            results = self.mnet_client.request_multiple_data(self.DESTINATION, all_requests)
 
         # Latest event text for quick display
         event_text = results[7].strip() if isinstance(results[7], str) else str(results[7]).strip()
