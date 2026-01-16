@@ -2,8 +2,7 @@
 Integration tests against a real turbine controller.
 
 These tests require a turbine connection configured in .env:
-    TURBINE_HOST=turbinepi.local
-    TURBINE_PORT=2217
+    TURBINE_CONNECTION=turbinepi.local:2217
 
 Tests are skipped if the environment is not configured.
 """

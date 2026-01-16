@@ -24,39 +24,77 @@ import mnet
 
 class TurbineMonitor:
     """Wind turbine monitoring and MQTT publishing."""
-    
+
     TOPIC_PREFIX = 'turbine/'
     DESTINATION = b'\x02'
     POLL_INTERVAL = 1.0
     ERROR_RETRY_DELAY = 10.0
     INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
-    
-    def __init__(self, serial_port: str, mqtt_host: str, web_port: int = 5000):
-        self.serial_port = serial_port
+
+    def __init__(self, connection: str, mqtt_host: str, web_port: int = 5000):
+        """Initialize turbine monitor.
+
+        Args:
+            connection: Serial port path (e.g., '/dev/ttyUSB0') or
+                       network address (e.g., 'host:port' or 'tcp://host:port')
+            mqtt_host: MQTT broker hostname
+            web_port: Web interface port (default 5000)
+        """
+        self.connection = connection
         self.mqtt_host = mqtt_host
         self.web_port = web_port
         self.pending_command: Optional[bytes] = None
         self.last_time_offset_update: Optional[datetime] = None
         self.logger = self._setup_logging()
-        
+
         # Monitoring data
         self.latest_data = {}
         self.mqtt_log = deque(maxlen=100)
         self.serial_log = deque(maxlen=100)
         self.debug_log = deque(maxlen=100)
         self.status = {'connected': False, 'last_update': None}
-        
+
         # Web server
         self.app = Flask(__name__)
         self.socketio = SocketIO(self.app, cors_allowed_origins="*")
         self._setup_web_routes()
-        
+
         # Initialize connections
-        self.serial_device = serial.Serial(port=serial_port, baudrate=38400, timeout=2)
+        self.serial_device = self._create_device(connection)
         self.mnet_client = mnet.Mnet(self.serial_device)
         self.mnet_client._log_callback = self._log_serial_hex
         self.mnet_client._debug_callback = self._log_debug_response
         self.mqtt_client = self._setup_mqtt()
+
+    def _create_device(self, connection: str):
+        """Create serial or network device based on connection string.
+
+        Args:
+            connection: '/dev/ttyUSB0' for serial, 'host:port' or 'tcp://host:port' for network
+
+        Returns:
+            Serial device or NetworkSerial instance
+        """
+        # Check for network connection formats
+        if connection.startswith('tcp://'):
+            # tcp://host:port format
+            addr = connection[6:]  # Remove 'tcp://'
+            host, port = addr.rsplit(':', 1)
+            self.logger.info(f"Using network connection: {host}:{port}")
+            device = mnet.NetworkSerial(host, int(port), timeout=5.0)
+            device.connect()
+            return device
+        elif ':' in connection and not connection.startswith('/'):
+            # host:port format (no path-like prefix)
+            host, port = connection.rsplit(':', 1)
+            self.logger.info(f"Using network connection: {host}:{port}")
+            device = mnet.NetworkSerial(host, int(port), timeout=5.0)
+            device.connect()
+            return device
+        else:
+            # Assume serial port path
+            self.logger.info(f"Using serial port: {connection}")
+            return serial.Serial(port=connection, baudrate=38400, timeout=2)
         
         # Get turbine serial number
         self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
@@ -220,12 +258,13 @@ class TurbineMonitor:
     
     def _clear_serial_buffers(self):
         """Clear serial input/output buffers to prevent timing issues."""
-        try:
-            self.serial_device.reset_input_buffer()
-            self.serial_device.reset_output_buffer()
-        except Exception as e:
-            self.logger.warning(f"Buffer clear failed: {e}")
-            self.logger.warning(traceback.format_exc())
+        # Only applies to real serial devices, not network connections
+        if hasattr(self.serial_device, 'reset_input_buffer'):
+            try:
+                self.serial_device.reset_input_buffer()
+                self.serial_device.reset_output_buffer()
+            except Exception as e:
+                self.logger.warning(f"Buffer clear failed: {e}")
     
     def _login_to_turbine(self):
         """Perform login to turbine."""
@@ -380,8 +419,29 @@ class TurbineMonitor:
 
 def main():
     """Main entry point."""
-    monitor = TurbineMonitor('/dev/ttyUSB0', 'mqtt.lan', 5000)
-    
+    import os
+
+    # Load .env file if it exists
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+    # Get configuration from environment
+    connection = os.environ.get('TURBINE_CONNECTION', '/dev/ttyUSB0')
+    mqtt_host = os.environ.get('MQTT_HOST', 'mqtt.lan')
+    web_port = int(os.environ.get('WEB_PORT', '5000'))
+
+    print(f"Turbine connection: {connection}")
+    print(f"MQTT host: {mqtt_host}")
+    print(f"Web port: {web_port}")
+
+    monitor = TurbineMonitor(connection, mqtt_host, web_port)
+
     try:
         monitor.run()
     except KeyboardInterrupt:

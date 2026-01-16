@@ -26,16 +26,30 @@ def load_dotenv():
 load_dotenv()
 
 
+def parse_connection(connection: str):
+    """Parse connection string into (host, port) tuple.
+
+    Args:
+        connection: 'host:port' or 'tcp://host:port'
+
+    Returns:
+        Tuple of (host, port)
+    """
+    if connection.startswith('tcp://'):
+        connection = connection[6:]
+    host, port = connection.rsplit(':', 1)
+    return (host, int(port))
+
+
 @pytest.fixture
 def turbine_connection():
     """Provide turbine connection parameters from environment.
 
     Returns tuple of (host, port) or None if not configured.
     """
-    host = os.environ.get('TURBINE_HOST')
-    port = os.environ.get('TURBINE_PORT')
-    if host and port:
-        return (host, int(port))
+    connection = os.environ.get('TURBINE_CONNECTION')
+    if connection:
+        return parse_connection(connection)
     return None
 
 
@@ -43,7 +57,7 @@ def turbine_connection():
 def require_turbine(turbine_connection):
     """Skip test if turbine connection is not configured."""
     if turbine_connection is None:
-        pytest.skip("TURBINE_HOST and TURBINE_PORT not configured in .env")
+        pytest.skip("TURBINE_CONNECTION not configured in .env")
     return turbine_connection
 
 
