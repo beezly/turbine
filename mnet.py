@@ -7,8 +7,24 @@ Provides communication interface for wind turbine controllers using the Mnet pro
 import socket
 import struct
 import datetime
-from typing import Tuple, List, Union, Optional
+from typing import Tuple, List, Union, Optional, Iterator, NamedTuple
 from crc import Calculator, Crc16
+
+
+class Event(NamedTuple):
+    """A turbine event from the event stack."""
+    index: int
+    code: int
+    timestamp: datetime.datetime
+    text: str
+
+
+class AlarmRecord(NamedTuple):
+    """An alarm type's last occurrence record."""
+    sub_id: int
+    last_occurred: datetime.datetime
+    description: str
+    has_occurred: bool  # False if timestamp is the "never" sentinel
 
 
 class NetworkSerial:
@@ -575,3 +591,160 @@ class Mnet:
         """Convert timestamp to datetime (epoch: 1980-01-01)."""
         epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
         return epoch + datetime.timedelta(seconds=timestamp)
+
+    # Sentinel date indicating alarm has never occurred
+    ALARM_NEVER_OCCURRED_DATE = datetime.datetime(2032, 5, 9, 6, 24, 0,
+                                                   tzinfo=datetime.timezone.utc)
+
+    def get_event(self, destination: bytes, index: int) -> Optional[Event]:
+        """Get a single event from the event stack.
+
+        Args:
+            destination: Target device address
+            index: Event index (0 = most recent, up to 99)
+
+        Returns:
+            Event namedtuple or None if index is empty
+        """
+        if not 0 <= index < self.EVENT_STACK_MAX_EVENTS:
+            raise ValueError(f"Event index must be 0-{self.EVENT_STACK_MAX_EVENTS - 1}")
+
+        base = index * self.EVENT_STACK_INDEX_MULTIPLIER
+        code = self.request_data(destination, self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                                 base + self.EVENT_STACK_SUBID_CODE)
+        if code is None:
+            return None
+
+        timestamp = self.request_data(destination, self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                                      base + self.EVENT_STACK_SUBID_TIMESTAMP)
+        text = self.request_data(destination, self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                                 base + self.EVENT_STACK_SUBID_TEXT)
+
+        return Event(
+            index=index,
+            code=int(code),
+            timestamp=timestamp,
+            text=text.strip() if isinstance(text, str) else str(text)
+        )
+
+    def get_events(self, destination: bytes,
+                   limit: Optional[int] = None) -> Iterator[Event]:
+        """Iterate over events in the event stack.
+
+        Args:
+            destination: Target device address
+            limit: Maximum number of events to return (default: all 100)
+
+        Yields:
+            Event namedtuples, most recent first
+        """
+        max_events = min(limit or self.EVENT_STACK_MAX_EVENTS,
+                        self.EVENT_STACK_MAX_EVENTS)
+
+        for index in range(max_events):
+            event = self.get_event(destination, index)
+            if event is not None:
+                yield event
+
+    def get_alarm_record(self, destination: bytes, sub_id: int) -> Optional[AlarmRecord]:
+        """Get the last occurrence record for a specific alarm type.
+
+        Args:
+            destination: Target device address
+            sub_id: Alarm sub_id (use known values like 5=Vibration, 18=Emergency stop)
+
+        Returns:
+            AlarmRecord namedtuple or None if sub_id is invalid
+        """
+        try:
+            timestamp = self.request_data(destination, self.DATA_ID_ALARM_LAST_OCCURRED, sub_id)
+            if timestamp is None:
+                return None
+
+            description = self.request_data(destination, self.DATA_ID_STATUS_TEXT, sub_id)
+            if description is None:
+                return None
+
+            # Check if alarm has actually occurred (not the "never" sentinel date)
+            has_occurred = True
+            if hasattr(timestamp, 'year') and timestamp.year == 2032:
+                has_occurred = False
+
+            return AlarmRecord(
+                sub_id=sub_id,
+                last_occurred=timestamp,
+                description=description.strip() if isinstance(description, str) else str(description),
+                has_occurred=has_occurred
+            )
+        except Exception:
+            return None
+
+    # Known alarm sub_ids (discovered via scanning)
+    ALARM_SUB_IDS = {
+        5: 'Vibration',
+        7: 'Turbine is serviced',
+        9: 'Remote stop',
+        11: 'Stop via communica.',
+        13: 'Manual stop',
+        18: 'Emergency stop',
+        23: 'Repeating error',
+        29: 'New program',
+        38: 'Alarm call test',
+        39: 'Division by zero',
+        40: 'Parameter crash',
+        42: 'Internal battery low',
+        45: 'Main ctrl. Supply',
+        51: 'DSP watchdog',
+        53: 'Main ctrl. watchdog',
+        55: 'Main ctrl.man.reboot',
+        99: 'Parkmasterstop',
+        100: 'Repeated grid error',
+        102: 'Phase drop',
+        103: 'Vector surge',
+        110: 'Voltage high',
+        111: 'Voltage low',
+        120: 'Frequency high',
+        121: 'Frequency low',
+        138: 'Grid param. warning',
+        139: 'Grid parameter stop',
+        227: 'Anemometer defect',
+        240: 'Awaiting wind',
+        250: 'Wind > max.',
+        300: '(G) tacho defect',
+        302: '(R) tacho defect',
+        311: 'Rotor overspeed',
+        312: '(G) overspeed',
+        314: 'Free wheeling oversp',
+        415: 'Brake pads worn',
+        416: 'Replace brake pads',
+        421: 'Brake not released',
+        434: 'B200 brake time>max.',
+        501: 'Power consumption',
+        521: '(G) hot',
+        530: '(G) power too high',
+        537: '(G) peak power',
+        601: 'Current asymmetry',
+        607: 'Auto. motorstart',
+        609: 'Thyristor block hot',
+        651: 'Cut in 0_>G1',
+        662: 'WP4060 error',
+        722: 'Cable twisted',
+    }
+
+    def get_alarm_history(self, destination: bytes,
+                          only_occurred: bool = False) -> Iterator[AlarmRecord]:
+        """Iterate over alarm types and their last occurrence times.
+
+        Args:
+            destination: Target device address
+            only_occurred: If True, only yield alarms that have actually occurred
+
+        Yields:
+            AlarmRecord namedtuples
+        """
+        for sub_id in sorted(self.ALARM_SUB_IDS.keys()):
+            record = self.get_alarm_record(destination, sub_id)
+            if record is not None:
+                if only_occurred and not record.has_occurred:
+                    continue
+                yield record
