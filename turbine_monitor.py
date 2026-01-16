@@ -376,7 +376,7 @@ class TurbineMonitor:
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
-        # Combined request for all data
+        # Combined request for all data (max ~17 items to stay within response limits)
         all_requests = [
             (mnet.Mnet.DATA_ID_WIND_SPEED, mnet.Mnet.DATA_AVERAGING_CURRENT),
             (mnet.Mnet.DATA_ID_ROTOR_REVS, mnet.Mnet.DATA_AVERAGING_CURRENT),
@@ -420,13 +420,7 @@ class TurbineMonitor:
             'l2v_1min': results[13],
             'l3v_1min': results[14]
         }
-        
-        # Safe formatting for None values
-        def safe_format(val, fmt):
-            return f'{val:{fmt}}' if val is not None else 'None'
-        
 
-        
         return data
     
     def _publish_data(self, data: Dict[str, Any]):

@@ -468,6 +468,71 @@
             border-radius: 6px;
         }
 
+        /* Event stack in status panel */
+        .event-stack-card {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .event-stack-status {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .event-stack-list {
+            flex: 1;
+            overflow-y: auto;
+            max-height: 280px;
+        }
+
+        .event-stack-placeholder {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            padding: 12px 0;
+        }
+
+        .event-stack-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border-subtle);
+            font-size: 0.8rem;
+        }
+
+        .event-stack-item:last-child {
+            border-bottom: none;
+        }
+
+        .event-stack-idx {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            background: rgba(56, 189, 248, 0.1);
+            padding: 1px 4px;
+            border-radius: 3px;
+            min-width: 18px;
+            text-align: center;
+        }
+
+        .event-stack-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .event-stack-text {
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .event-stack-time {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+
         /* Logs section */
         .logs-section {
             grid-column: 1 / -1;
@@ -982,13 +1047,13 @@
                     </div>
                 </div>
 
-                <div class="status-card">
+                <div class="status-card event-stack-card">
                     <div class="card-header">
-                        <span class="card-title">Recent Event</span>
+                        <span class="card-title">Event Stack</span>
+                        <span id="eventStackStatus" class="event-stack-status">Loading...</span>
                     </div>
-                    <div class="status-item">
-                        <span class="status-item-label">Latest</span>
-                        <span id="eventStack0" class="status-item-value">--</span>
+                    <div id="eventStackList" class="event-stack-list">
+                        <div class="event-stack-placeholder">Loading events...</div>
                     </div>
                 </div>
             </div>
@@ -1070,6 +1135,8 @@
 
         socket.on('connect', function() {
             console.log('Connected to server');
+            // Load event stack on connect
+            loadEventStack();
         });
 
         socket.on('status', function(data) {
@@ -1101,16 +1168,15 @@
             updateMetric('l3v', data.l3v, 0, ' V');
 
             document.getElementById('statusMessage').textContent = data.status_message || '--';
-            document.getElementById('eventStack0').textContent = data.event_stack_0 || '--';
             document.getElementById('controllerTime').textContent = data.controller_time || '--';
 
-            // Auto-refresh events when state changes (rate-limited to 10s)
+            // Auto-refresh event stack when state changes (rate-limited to 10s)
             const currentEventText = data.event_stack_0 || '';
             if (lastEventText !== null && currentEventText !== lastEventText) {
                 const now = Date.now();
                 if (now - lastEventsRefresh >= EVENTS_REFRESH_INTERVAL) {
-                    console.log('Event changed, auto-refreshing event history...');
-                    loadEvents();
+                    console.log('Event changed, auto-refreshing event stack...');
+                    loadEventStack();
                 }
             }
             lastEventText = currentEventText;
@@ -1224,39 +1290,6 @@
             socket.emit('get_events', { limit: limit });
         }
 
-        // Handle events response
-        socket.on('events', function(events) {
-            const list = document.getElementById('eventsList');
-            const info = document.getElementById('eventsInfo');
-            const btn = document.getElementById('loadEventsBtn');
-
-            btn.disabled = false;
-            btn.innerHTML = '<span class="btn-icon">&#8635;</span> Refresh';
-
-            if (!events || events.length === 0) {
-                list.innerHTML = '<div class="history-placeholder">No events found</div>';
-                info.textContent = 'No events in stack';
-                return;
-            }
-
-            info.textContent = `Showing ${events.length} events`;
-            list.innerHTML = events.map(event => {
-                const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Unknown';
-                return `
-                    <div class="history-item">
-                        <span class="history-item-index">${event.index}</span>
-                        <div class="history-item-content">
-                            <div class="history-item-text">${escapeHtml(event.text)}</div>
-                            <div class="history-item-meta">
-                                <span class="history-item-code">Code ${event.code}</span>
-                                ${timestamp}
-                            </div>
-                        </div>
-                    </div>
-                `;
-            }).join('');
-        });
-
         // Load alarms from turbine
         function loadAlarms() {
             const onlyOccurred = document.getElementById('onlyOccurred').checked;
@@ -1311,6 +1344,77 @@
             div.textContent = text;
             return div.innerHTML;
         }
+
+        // Load event stack (10 events for status panel)
+        function loadEventStack() {
+            const status = document.getElementById('eventStackStatus');
+            status.textContent = 'Loading...';
+            lastEventsRefresh = Date.now();
+            socket.emit('get_events', { limit: 10 });
+        }
+
+        // Handle events response - update both event stack panel and history panel
+        socket.on('events', function(events) {
+            // Sort events by index (most recent = lowest index first)
+            if (events && events.length > 0) {
+                events.sort((a, b) => a.index - b.index);
+            }
+
+            // Update the event stack in status panel
+            const stackList = document.getElementById('eventStackList');
+            const stackStatus = document.getElementById('eventStackStatus');
+
+            if (!events || events.length === 0) {
+                stackList.innerHTML = '<div class="event-stack-placeholder">No events</div>';
+                stackStatus.textContent = '';
+            } else {
+                stackStatus.textContent = `${events.length} events`;
+                stackList.innerHTML = events.map(event => {
+                    const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
+                    return `
+                        <div class="event-stack-item">
+                            <span class="event-stack-idx">${event.index}</span>
+                            <div class="event-stack-content">
+                                <div class="event-stack-text">${escapeHtml(event.text)}</div>
+                                <div class="event-stack-time">${time}</div>
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            }
+
+            // Also update history panel if it exists
+            const historyList = document.getElementById('eventsList');
+            const historyInfo = document.getElementById('eventsInfo');
+            const historyBtn = document.getElementById('loadEventsBtn');
+
+            if (historyList && historyInfo && historyBtn) {
+                historyBtn.disabled = false;
+                historyBtn.innerHTML = '<span class="btn-icon">&#8635;</span> Refresh';
+
+                if (!events || events.length === 0) {
+                    historyList.innerHTML = '<div class="history-placeholder">No events found</div>';
+                    historyInfo.textContent = 'No events in stack';
+                } else {
+                    historyInfo.textContent = `Showing ${events.length} events`;
+                    historyList.innerHTML = events.map(event => {
+                        const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Unknown';
+                        return `
+                            <div class="history-item">
+                                <span class="history-item-index">${event.index}</span>
+                                <div class="history-item-content">
+                                    <div class="history-item-text">${escapeHtml(event.text)}</div>
+                                    <div class="history-item-meta">
+                                        <span class="history-item-code">Code ${event.code}</span>
+                                        ${timestamp}
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }).join('');
+                }
+            }
+        });
     </script>
 </body>
 </html>
