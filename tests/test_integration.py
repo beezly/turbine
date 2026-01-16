@@ -167,7 +167,7 @@ class TestTurbineTime:
             mnet.login(b'\x02')
 
             # Get time before
-            time_before = mnet.get_controller_time(b'\x02', adjust=False)
+            time_before = mnet.get_controller_time(b'\x02')
             print(f"\nController time before: {time_before}")
 
             # Set to current time
@@ -175,7 +175,7 @@ class TestTurbineTime:
             assert response is not None
 
             # Get time after
-            time_after = mnet.get_controller_time(b'\x02', adjust=False)
+            time_after = mnet.get_controller_time(b'\x02')
             print(f"Controller time after: {time_after}")
 
             # Verify time is close to current UTC

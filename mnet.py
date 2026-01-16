@@ -217,7 +217,6 @@ class Mnet:
         self.encoded_serial: Optional[bytearray] = None
         self._log_callback = None
         self._debug_callback = None
-        self.time_offset: Optional[datetime.timedelta] = None
     
     def create_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Create an Mnet packet."""
@@ -431,39 +430,7 @@ class Mnet:
         if self.serial is None:
             self.serial, serial_bytes = self.get_serial_number(destination)
             self.encoded_serial = self.encode_serial(serial_bytes)
-            # Initialize time offset on first connection
-            self._initialize_time_offset(destination)
-    
-    def _initialize_time_offset(self, destination: bytes) -> None:
-        """Initialize time offset between controller and real time."""
-        try:
-            controller_time = self.get_controller_time(destination, False)
-            real_time = datetime.datetime.now(datetime.timezone.utc)            
-            self.time_offset = controller_time - real_time
-            
-            # Log time offset to debug
-            if self._debug_callback:
-                self._debug_callback({
-                    'request_data_id': 'TIME_OFFSET',
-                    'request_sub_id': 0,
-                    'response_mainid': 0,
-                    'response_subid': 0,
-                    'data_type': 'offset',
-                    'value': f'Controller: {controller_time}, Real: {real_time}, Offset: {self.time_offset}',
-                    'decoded_hex': 'time_offset_init'
-                })
-        except Exception as e:
-            self.time_offset = None
-            if self._debug_callback:
-                self._debug_callback({
-                    'request_data_id': 'TIME_OFFSET',
-                    'request_sub_id': 0,
-                    'response_mainid': 0,
-                    'response_subid': 0, 
-                    'data_type': 'error',
-                    'value': f'Error initializing time offset: {str(e)}',
-                    'decoded_hex': 'time_offset_error'
-                })    
+
     def send_command(self, destination: bytes, command_id: bytes) -> MnetPacket:
         """Send command to device."""
         self._ensure_serial_available(destination)
@@ -528,17 +495,11 @@ class Mnet:
         login_data = self.encode(self.create_login_packet_data(), self.encoded_serial)
         return self.send_packet(destination, self.REQ_LOGIN, login_data)
     
-    def get_controller_time(self, destination: bytes, adjust: bool = True) -> datetime.datetime:
+    def get_controller_time(self, destination: bytes) -> datetime.datetime:
         """Get controller time and convert to datetime."""
         timestamp = self.request_data(destination, self.DATA_ID_CONTROLLER_TIME, 0)
         # Parse timestamp string in format YYMMDDHHmmSS as UTC
-        dt = datetime.datetime.strptime(timestamp, "%y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
-        if adjust and self.time_offset is not None:
-            try:
-                dt += self.time_offset
-            except OverflowError:
-                pass
-        return dt
+        return datetime.datetime.strptime(timestamp, "%y%m%d%H%M%S").replace(tzinfo=datetime.timezone.utc)
 
     def set_controller_time(self, destination: bytes,
                            time: Optional[datetime.datetime] = None) -> MnetPacket:
@@ -574,20 +535,7 @@ class Mnet:
 
         return self.send_packet(destination, self.REQ_WRITE_DATA, write_data)
 
-    def update_time_offset(self, destination: bytes) -> None:
-        """Update time offset between controller and real time."""
-        self._initialize_time_offset(destination)
-    
-    def timestamp_to_datetime(self, timestamp: int, adjust: bool = True) -> datetime.datetime:
+    def timestamp_to_datetime(self, timestamp: int) -> datetime.datetime:
         """Convert timestamp to datetime (epoch: 1980-01-01)."""
         epoch = datetime.datetime(1980, 1, 1, tzinfo=datetime.timezone.utc)
-        dt = epoch + datetime.timedelta(seconds=timestamp)
-        
-        if adjust and self.time_offset is not None:
-            try:
-                dt += self.time_offset
-            except OverflowError:
-                # Return unadjusted datetime if offset causes overflow
-                pass
-        
-        return dt
+        return epoch + datetime.timedelta(seconds=timestamp)

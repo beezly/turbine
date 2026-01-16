@@ -45,7 +45,6 @@ class TurbineMonitor:
         self.mqtt_host = mqtt_host
         self.web_port = web_port
         self.pending_command: Optional[bytes] = None
-        self.last_time_offset_update: Optional[datetime] = None
         self.last_time_sync: Optional[datetime] = None
         self.logger = self._setup_logging()
 
@@ -307,14 +306,6 @@ class TurbineMonitor:
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
-        # Update time offset once per 24 hours
-        now = datetime.now()
-        if (self.last_time_offset_update is None or 
-            (now - self.last_time_offset_update).total_seconds() >= 86400):
-            self.mnet_client.update_time_offset(self.DESTINATION)
-            self.last_time_offset_update = now
-            self.logger.info("Updated time offset")
-        
         # Combined request for all data
         all_requests = [
             (mnet.Mnet.DATA_ID_WIND_SPEED, mnet.Mnet.DATA_AVERAGING_CURRENT),
@@ -351,7 +342,6 @@ class TurbineMonitor:
             'event_stack_1': results[8],
             'event_stack_0': results[9],
             'controller_time': results[10],
-            'time_offset': str(self.mnet_client.time_offset) if self.mnet_client.time_offset else 'None',
             'current_status_code_0': results[11],
             'current_status_code_1': results[12],
             # 1-minute averages
