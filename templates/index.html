@@ -1064,6 +1064,9 @@
     <script>
         const socket = io();
         let currentLogTab = 'serial';
+        let lastEventText = null;
+        let lastEventsRefresh = 0;
+        const EVENTS_REFRESH_INTERVAL = 10000; // 10 seconds minimum between auto-refreshes
 
         socket.on('connect', function() {
             console.log('Connected to server');
@@ -1100,6 +1103,17 @@
             document.getElementById('statusMessage').textContent = data.status_message || '--';
             document.getElementById('eventStack0').textContent = data.event_stack_0 || '--';
             document.getElementById('controllerTime').textContent = data.controller_time || '--';
+
+            // Auto-refresh events when state changes (rate-limited to 10s)
+            const currentEventText = data.event_stack_0 || '';
+            if (lastEventText !== null && currentEventText !== lastEventText) {
+                const now = Date.now();
+                if (now - lastEventsRefresh >= EVENTS_REFRESH_INTERVAL) {
+                    console.log('Event changed, auto-refreshing event history...');
+                    loadEvents();
+                }
+            }
+            lastEventText = currentEventText;
 
             updateMetric('power1min', data.power_W_10min, 0, ' W');
             updateMetric('l1v1min', data.l1v_1min, 0, ' V');
@@ -1205,6 +1219,7 @@
             btn.disabled = true;
             btn.innerHTML = '<span class="loading-spinner"></span> Loading...';
             info.textContent = 'Fetching events from turbine...';
+            lastEventsRefresh = Date.now();
 
             socket.emit('get_events', { limit: limit });
         }
