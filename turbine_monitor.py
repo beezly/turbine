@@ -66,6 +66,14 @@ class TurbineMonitor:
         self.mnet_client._debug_callback = self._log_debug_response
         self.mqtt_client = self._setup_mqtt()
 
+        # Get turbine serial number
+        self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
+        self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
+        self.logger.info(f"Connected to turbine serial: {self.serial_number}")
+
+        # Setup MQTT command subscription
+        self._setup_command_subscription()
+
     def _create_device(self, connection: str):
         """Create serial or network device based on connection string.
 
@@ -95,15 +103,7 @@ class TurbineMonitor:
             # Assume serial port path
             self.logger.info(f"Using serial port: {connection}")
             return serial.Serial(port=connection, baudrate=38400, timeout=2)
-        
-        # Get turbine serial number
-        self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
-        self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
-        self.logger.info(f"Connected to turbine serial: {self.serial_number}")
-        
-        # Setup MQTT command subscription
-        self._setup_command_subscription()
-    
+
     def _setup_logging(self) -> logging.Logger:
         """Setup logging configuration."""
         logging.basicConfig(
@@ -382,7 +382,7 @@ class TurbineMonitor:
         
         # Start web server in separate thread
         web_thread = threading.Thread(
-            target=lambda: self.socketio.run(self.app, host='0.0.0.0', port=self.web_port, debug=False)
+            target=lambda: self.socketio.run(self.app, host='0.0.0.0', port=self.web_port, debug=False, allow_unsafe_werkzeug=True)
         )
         web_thread.daemon = True
         web_thread.start()
