@@ -4,10 +4,96 @@ Mnet Protocol Implementation
 Provides communication interface for wind turbine controllers using the Mnet protocol.
 """
 
+import socket
 import struct
 import datetime
 from typing import Tuple, List, Union, Optional
 from crc import Calculator, Crc16
+
+
+class NetworkSerial:
+    """TCP socket wrapper providing a serial-like interface for ser2net connections."""
+
+    def __init__(self, host: str, port: int, timeout: float = 5.0):
+        """Initialize network serial connection.
+
+        Args:
+            host: ser2net server hostname or IP address
+            port: ser2net server port
+            timeout: Socket timeout in seconds (default 5.0)
+        """
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self._socket: Optional[socket.socket] = None
+
+    def connect(self) -> None:
+        """Establish connection to ser2net server."""
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.settimeout(self.timeout)
+        self._socket.connect((self.host, self.port))
+
+    def close(self) -> None:
+        """Close the connection."""
+        if self._socket:
+            try:
+                self._socket.close()
+            except Exception:
+                pass
+            self._socket = None
+
+    def read(self, size: int) -> bytes:
+        """Read exactly size bytes from the connection.
+
+        Args:
+            size: Number of bytes to read
+
+        Returns:
+            Bytes read from connection
+
+        Raises:
+            ConnectionError: If connection is closed or read fails
+        """
+        if not self._socket:
+            raise ConnectionError("Not connected")
+
+        data = b''
+        while len(data) < size:
+            chunk = self._socket.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("Connection closed")
+            data += chunk
+        return data
+
+    def write(self, data: bytes) -> int:
+        """Write data to the connection.
+
+        Args:
+            data: Bytes to write
+
+        Returns:
+            Number of bytes written
+
+        Raises:
+            ConnectionError: If connection is closed or write fails
+        """
+        if not self._socket:
+            raise ConnectionError("Not connected")
+        return self._socket.send(data)
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if connection is active."""
+        return self._socket is not None
+
+    def __enter__(self) -> 'NetworkSerial':
+        """Context manager entry."""
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Context manager exit."""
+        self.close()
 
 
 class MnetPacket:

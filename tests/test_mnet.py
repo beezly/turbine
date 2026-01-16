@@ -5,7 +5,141 @@ import datetime
 from crc import Calculator, Crc16
 import pytest
 
-from mnet import Mnet
+from mnet import Mnet, NetworkSerial
+
+
+class TestNetworkSerial(unittest.TestCase):
+    """Test cases for the NetworkSerial class."""
+
+    def test_initialization(self):
+        """Test NetworkSerial initialization."""
+        ns = NetworkSerial('localhost', 3000)
+        self.assertEqual(ns.host, 'localhost')
+        self.assertEqual(ns.port, 3000)
+        self.assertEqual(ns.timeout, 5.0)
+        self.assertFalse(ns.is_connected)
+
+    def test_initialization_custom_timeout(self):
+        """Test NetworkSerial with custom timeout."""
+        ns = NetworkSerial('192.168.1.1', 4000, timeout=10.0)
+        self.assertEqual(ns.timeout, 10.0)
+
+    @patch('mnet.socket.socket')
+    def test_connect(self, mock_socket_class):
+        """Test connection establishment."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+
+        mock_socket.settimeout.assert_called_once_with(5.0)
+        mock_socket.connect.assert_called_once_with(('localhost', 3000))
+        self.assertTrue(ns.is_connected)
+
+    @patch('mnet.socket.socket')
+    def test_close(self, mock_socket_class):
+        """Test connection close."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        ns.close()
+
+        mock_socket.close.assert_called_once()
+        self.assertFalse(ns.is_connected)
+
+    @patch('mnet.socket.socket')
+    def test_read(self, mock_socket_class):
+        """Test reading data."""
+        mock_socket = Mock()
+        mock_socket.recv.return_value = b'\x01\x02\x03\x04'
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        data = ns.read(4)
+
+        self.assertEqual(data, b'\x01\x02\x03\x04')
+        mock_socket.recv.assert_called_once_with(4)
+
+    @patch('mnet.socket.socket')
+    def test_read_chunked(self, mock_socket_class):
+        """Test reading data in chunks."""
+        mock_socket = Mock()
+        mock_socket.recv.side_effect = [b'\x01\x02', b'\x03\x04']
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        data = ns.read(4)
+
+        self.assertEqual(data, b'\x01\x02\x03\x04')
+        self.assertEqual(mock_socket.recv.call_count, 2)
+
+    @patch('mnet.socket.socket')
+    def test_write(self, mock_socket_class):
+        """Test writing data."""
+        mock_socket = Mock()
+        mock_socket.send.return_value = 4
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        written = ns.write(b'\x01\x02\x03\x04')
+
+        self.assertEqual(written, 4)
+        mock_socket.send.assert_called_once_with(b'\x01\x02\x03\x04')
+
+    def test_read_not_connected(self):
+        """Test reading when not connected raises error."""
+        ns = NetworkSerial('localhost', 3000)
+        with self.assertRaises(ConnectionError):
+            ns.read(4)
+
+    def test_write_not_connected(self):
+        """Test writing when not connected raises error."""
+        ns = NetworkSerial('localhost', 3000)
+        with self.assertRaises(ConnectionError):
+            ns.write(b'\x01\x02')
+
+    @patch('mnet.socket.socket')
+    def test_read_connection_closed(self, mock_socket_class):
+        """Test reading when connection is closed by remote."""
+        mock_socket = Mock()
+        mock_socket.recv.return_value = b''  # Empty bytes means connection closed
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        with self.assertRaises(ConnectionError):
+            ns.read(4)
+
+    @patch('mnet.socket.socket')
+    def test_context_manager(self, mock_socket_class):
+        """Test context manager protocol."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+
+        with NetworkSerial('localhost', 3000) as ns:
+            self.assertTrue(ns.is_connected)
+            mock_socket.connect.assert_called_once()
+
+        mock_socket.close.assert_called_once()
+
+    @patch('mnet.socket.socket')
+    def test_use_with_mnet(self, mock_socket_class):
+        """Test NetworkSerial can be used with Mnet class."""
+        mock_socket = Mock()
+        mock_socket_class.return_value = mock_socket
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+
+        # Mnet should accept NetworkSerial as device
+        mnet = Mnet(ns)
+        self.assertEqual(mnet.device, ns)
 
 
 class TestMnetPacket(unittest.TestCase):
