@@ -1045,6 +1045,14 @@
                         <span class="status-item-label">Controller Time</span>
                         <span id="controllerTime" class="status-item-value">--</span>
                     </div>
+                    <div class="status-item">
+                        <span class="status-item-label">Runtime 1</span>
+                        <span id="runtime1" class="status-item-value">--</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-item-label">Runtime 2</span>
+                        <span id="runtime2" class="status-item-value">--</span>
+                    </div>
                 </div>
 
                 <div class="status-card event-stack-card">
@@ -1169,6 +1177,8 @@
 
             document.getElementById('statusMessage').textContent = data.status_message || '--';
             document.getElementById('controllerTime').textContent = data.controller_time || '--';
+            document.getElementById('runtime1').textContent = formatRuntime(data.runtime_1_sec);
+            document.getElementById('runtime2').textContent = formatRuntime(data.runtime_2_sec);
 
             // Auto-refresh event stack when state changes (rate-limited to 10s)
             const currentEventText = data.event_stack_0 || '';
@@ -1193,6 +1203,20 @@
                 el.textContent = value.toFixed(decimals) + suffix;
             } else {
                 el.textContent = '--';
+            }
+        }
+
+        function formatRuntime(seconds) {
+            if (seconds === null || seconds === undefined) return '--';
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = Math.floor(seconds % 60);
+            if (hrs > 0) {
+                return `${hrs}h ${mins}m ${secs}s`;
+            } else if (mins > 0) {
+                return `${mins}m ${secs}s`;
+            } else {
+                return `${secs}s`;
             }
         }
 

@@ -392,7 +392,9 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_GRID_POWER, mnet.Mnet.DATA_AVERAGING_10MIN),
             (mnet.Mnet.DATA_ID_L1V, mnet.Mnet.DATA_AVERAGING_1MIN),
             (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_1MIN),
-            (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN)
+            (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN),
+            (mnet.Mnet.DATA_ID_RUNTIME_1, 0),  # Runtime counter 1
+            (mnet.Mnet.DATA_ID_RUNTIME_2, 0),  # Runtime counter 2
         ]
 
         with self.serial_lock:
@@ -418,7 +420,10 @@ class TurbineMonitor:
             'power_W_10min': results[11],
             'l1v_1min': results[12],
             'l2v_1min': results[13],
-            'l3v_1min': results[14]
+            'l3v_1min': results[14],
+            # Runtime counters (in seconds)
+            'runtime_1_sec': results[15] if len(results) > 15 else None,
+            'runtime_2_sec': results[16] if len(results) > 16 else None,
         }
 
         return data

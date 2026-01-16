@@ -194,6 +194,10 @@ class Mnet:
     DATA_ID_STATUS_CODE_LOOKUP = b'\xc7\xa0'  # Status code text lookup (sub_id = status code)
     DATA_ID_ALARM_LAST_OCCURRED = b'\xc7\x3b'  # Last occurrence time per alarm type (sub_id = alarm sub_id)
 
+    # Runtime counters (discovered 0x0003, 0x0004)
+    DATA_ID_RUNTIME_1 = b'\x00\x03'  # Runtime counter 1 (seconds)
+    DATA_ID_RUNTIME_2 = b'\x00\x04'  # Runtime counter 2 (seconds)
+
     # Sub-IDs for EVENT_STACK_STATUS_CODE (0x000B)
     # Event history is at sub_id = (event_index * 100) + offset
     # event_index 0 = most recent, up to 99 (100 events total)
@@ -202,6 +206,9 @@ class Mnet:
     EVENT_STACK_SUBID_TEXT = 2       # Human-readable event description (use this, not lookup)
     EVENT_STACK_INDEX_MULTIPLIER = 100  # sub_id = event_index * 100 + offset
     EVENT_STACK_MAX_EVENTS = 100     # Stack holds 100 events (indices 0-99)
+
+    # Maximum items per batch request (controller limit is ~17-20)
+    MAX_BATCH_SIZE = 15
 
     # Controller info data IDs (discovered)
     DATA_ID_CONTROLLER_INFO = b'\x00\x01'  # sub_id=1: program number, sub_id=2: version
@@ -235,6 +242,8 @@ class Mnet:
     # Data IDs that use data_type 6 (uint32) but should NOT be converted to datetime
     # These return numeric values even though the protocol marks them as "timestamp" type
     DATA_IDS_NOT_TIMESTAMP = {
+        0x0003,  # RUNTIME_1 - runtime counter in seconds
+        0x0004,  # RUNTIME_2 - runtime counter in seconds
         0x9cae,  # GRID_FREQUENCY - returns Hz (e.g., 49.9)
         0xc739,  # ERROR_COUNT - returns count
         0xc73a,  # STOP_DUE_TO_ERROR - returns seconds (duration, not absolute time)
@@ -648,57 +657,58 @@ class Mnet:
                 yield event
 
     def get_events_batch(self, destination: bytes, limit: int = 10) -> List[Event]:
-        """Fetch multiple events from the event stack in a single batch request.
+        """Fetch multiple events from the event stack using chunked batch requests.
 
-        This is more efficient than calling get_event() repeatedly, as it
-        combines all event data (code, timestamp, text) for multiple events
-        into a single request_multiple_data() call.
+        Splits requests into smaller chunks to stay within controller limits.
 
         Args:
             destination: Target device address
-            limit: Number of events to fetch (default: 10, max: 33 due to packet size)
+            limit: Number of events to fetch (default: 10)
 
         Returns:
             List of Event namedtuples, most recent first (index 0)
         """
-        # Limit batch size due to packet size constraints (3 items per event)
-        # Max ~33 events per batch (99 data items + overhead)
-        max_batch = min(limit, 33)
+        # 3 items per event (code, timestamp, text), chunk to stay under limit
+        items_per_event = 3
+        events_per_chunk = self.MAX_BATCH_SIZE // items_per_event  # 5 events per chunk
 
-        # Build request list: for each event, request code, timestamp, and text
-        requests = []
-        for index in range(max_batch):
-            base = index * self.EVENT_STACK_INDEX_MULTIPLIER
-            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
-                           base + self.EVENT_STACK_SUBID_CODE))
-            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
-                           base + self.EVENT_STACK_SUBID_TIMESTAMP))
-            requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
-                           base + self.EVENT_STACK_SUBID_TEXT))
-
-        # Execute batch request
-        results = self.request_multiple_data(destination, requests)
-
-        # Parse results into Event objects (3 results per event)
         events = []
-        for i in range(max_batch):
-            base_idx = i * 3
-            if base_idx + 2 >= len(results):
-                break
+        for chunk_start in range(0, limit, events_per_chunk):
+            chunk_end = min(chunk_start + events_per_chunk, limit)
 
-            code = results[base_idx]
-            timestamp = results[base_idx + 1]
-            text = results[base_idx + 2]
+            # Build request list for this chunk
+            requests = []
+            for index in range(chunk_start, chunk_end):
+                base = index * self.EVENT_STACK_INDEX_MULTIPLIER
+                requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                               base + self.EVENT_STACK_SUBID_CODE))
+                requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                               base + self.EVENT_STACK_SUBID_TIMESTAMP))
+                requests.append((self.DATA_ID_EVENT_STACK_STATUS_CODE,
+                               base + self.EVENT_STACK_SUBID_TEXT))
 
-            if code is None:
-                continue
+            # Execute batch request for this chunk
+            results = self.request_multiple_data(destination, requests)
 
-            events.append(Event(
-                index=i,
-                code=int(code) if code is not None else 0,
-                timestamp=timestamp,
-                text=text.strip() if isinstance(text, str) else str(text)
-            ))
+            # Parse results into Event objects (3 results per event)
+            for i, index in enumerate(range(chunk_start, chunk_end)):
+                base_idx = i * 3
+                if base_idx + 2 >= len(results):
+                    break
+
+                code = results[base_idx]
+                timestamp = results[base_idx + 1]
+                text = results[base_idx + 2]
+
+                if code is None:
+                    continue
+
+                events.append(Event(
+                    index=index,
+                    code=int(code) if code is not None else 0,
+                    timestamp=timestamp,
+                    text=text.strip() if isinstance(text, str) else str(text)
+                ))
 
         return events
 
@@ -807,14 +817,11 @@ class Mnet:
 
     def get_alarm_history_batch(self, destination: bytes,
                                 only_occurred: bool = False) -> List[AlarmRecord]:
-        """Fetch alarm history in a single batch request.
+        """Fetch alarm history using chunked batch requests.
 
-        This is more efficient than calling get_alarm_record() repeatedly, as it
-        combines all alarm data (timestamp and description) for all known alarm
-        types into a single request_multiple_data() call.
-
+        Splits requests into smaller chunks to stay within controller limits.
         Uses cached descriptions when available (populated on first call),
-        so subsequent calls only fetch timestamps (half the requests).
+        so subsequent calls only fetch timestamps.
 
         Args:
             destination: Target device address
@@ -826,57 +833,72 @@ class Mnet:
         sub_ids = sorted(self.ALARM_SUB_IDS.keys())
         use_cache = len(self._alarm_description_cache) >= len(sub_ids)
 
-        # Build request list
-        requests = []
-        if use_cache:
-            # Only fetch timestamps (descriptions are cached)
-            for sub_id in sub_ids:
-                requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
-        else:
-            # Fetch both timestamps and descriptions
-            for sub_id in sub_ids:
-                requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
-                requests.append((self.DATA_ID_STATUS_TEXT, sub_id))
-
-        # Execute batch request
-        results = self.request_multiple_data(destination, requests)
-
-        # Parse results into AlarmRecord objects
         alarms = []
-        for i, sub_id in enumerate(sub_ids):
-            if use_cache:
-                # Results are just timestamps (1 per alarm)
-                if i >= len(results):
-                    break
-                timestamp = results[i]
-                description = self._alarm_description_cache.get(sub_id, '')
-            else:
-                # Results are timestamp+description pairs (2 per alarm)
-                base_idx = i * 2
-                if base_idx + 1 >= len(results):
-                    break
-                timestamp = results[base_idx]
-                description = results[base_idx + 1]
-                # Cache the description for future calls
-                if isinstance(description, str):
-                    self._alarm_description_cache[sub_id] = description.strip()
 
-            if timestamp is None:
-                continue
+        if use_cache:
+            # Only fetch timestamps - can fit more per batch
+            for chunk_start in range(0, len(sub_ids), self.MAX_BATCH_SIZE):
+                chunk_sub_ids = sub_ids[chunk_start:chunk_start + self.MAX_BATCH_SIZE]
+                requests = [(self.DATA_ID_ALARM_LAST_OCCURRED, sub_id) for sub_id in chunk_sub_ids]
+                results = self.request_multiple_data(destination, requests)
 
-            # Check if alarm has actually occurred (not the "never" sentinel date)
-            has_occurred = True
-            if hasattr(timestamp, 'year') and timestamp.year == 2032:
-                has_occurred = False
+                for i, sub_id in enumerate(chunk_sub_ids):
+                    if i >= len(results):
+                        break
+                    timestamp = results[i]
+                    description = self._alarm_description_cache.get(sub_id, '')
 
-            if only_occurred and not has_occurred:
-                continue
+                    if timestamp is None:
+                        continue
 
-            alarms.append(AlarmRecord(
-                sub_id=sub_id,
-                last_occurred=timestamp,
-                description=description.strip() if isinstance(description, str) else str(description),
-                has_occurred=has_occurred
-            ))
+                    has_occurred = not (hasattr(timestamp, 'year') and timestamp.year == 2032)
+                    if only_occurred and not has_occurred:
+                        continue
+
+                    alarms.append(AlarmRecord(
+                        sub_id=sub_id,
+                        last_occurred=timestamp,
+                        description=description.strip() if isinstance(description, str) else str(description),
+                        has_occurred=has_occurred
+                    ))
+        else:
+            # Fetch timestamps + descriptions (2 items per alarm, smaller chunks)
+            items_per_alarm = 2
+            alarms_per_chunk = self.MAX_BATCH_SIZE // items_per_alarm
+
+            for chunk_start in range(0, len(sub_ids), alarms_per_chunk):
+                chunk_sub_ids = sub_ids[chunk_start:chunk_start + alarms_per_chunk]
+                requests = []
+                for sub_id in chunk_sub_ids:
+                    requests.append((self.DATA_ID_ALARM_LAST_OCCURRED, sub_id))
+                    requests.append((self.DATA_ID_STATUS_TEXT, sub_id))
+
+                results = self.request_multiple_data(destination, requests)
+
+                for i, sub_id in enumerate(chunk_sub_ids):
+                    base_idx = i * 2
+                    if base_idx + 1 >= len(results):
+                        break
+
+                    timestamp = results[base_idx]
+                    description = results[base_idx + 1]
+
+                    # Cache description for future calls
+                    if isinstance(description, str):
+                        self._alarm_description_cache[sub_id] = description.strip()
+
+                    if timestamp is None:
+                        continue
+
+                    has_occurred = not (hasattr(timestamp, 'year') and timestamp.year == 2032)
+                    if only_occurred and not has_occurred:
+                        continue
+
+                    alarms.append(AlarmRecord(
+                        sub_id=sub_id,
+                        last_occurred=timestamp,
+                        description=description.strip() if isinstance(description, str) else str(description),
+                        has_occurred=has_occurred
+                    ))
 
         return alarms
