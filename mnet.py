@@ -174,6 +174,21 @@ class Mnet:
     DATA_ID_GRID_VAR = b'\x9c\xad'
     DATA_ID_CURRENT_STATUS_CODE = b'\x00\x0c'
     DATA_ID_EVENT_STACK_STATUS_CODE = b'\x00\x0b'
+    DATA_ID_STATUS_TEXT = b'\xc7\x3c'  # Current status or alarm text by sub_id
+    DATA_ID_STATUS_CODE_LOOKUP = b'\xc7\xa0'  # Status code text lookup (sub_id = status code)
+    DATA_ID_ALARM_LAST_OCCURRED = b'\xc7\x3b'  # Last occurrence time per alarm type (sub_id = alarm sub_id)
+
+    # Sub-IDs for EVENT_STACK_STATUS_CODE (0x000B)
+    # Event history is at sub_id = (event_index * 100) + offset
+    # event_index 0 = most recent, up to 99 (100 events total)
+    EVENT_STACK_SUBID_CODE = 0       # Status code number (0 is valid, e.g., "COMPENSATOR 1 IN")
+    EVENT_STACK_SUBID_TIMESTAMP = 1  # When event occurred
+    EVENT_STACK_SUBID_TEXT = 2       # Human-readable event description (use this, not lookup)
+    EVENT_STACK_INDEX_MULTIPLIER = 100  # sub_id = event_index * 100 + offset
+    EVENT_STACK_MAX_EVENTS = 100     # Stack holds 100 events (indices 0-99)
+
+    # Controller info data IDs (discovered)
+    DATA_ID_CONTROLLER_INFO = b'\x00\x01'  # sub_id=1: program number, sub_id=2: version
     
     # Real-time measurements averaging - from DATAID.DAT
 
