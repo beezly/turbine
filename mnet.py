@@ -216,6 +216,7 @@ class Mnet:
         self.serial: Optional[int] = None
         self.encoded_serial: Optional[bytearray] = None
         self._log_callback = None
+        self._debug_callback = None
         self.time_offset: Optional[datetime.timedelta] = None
     
     def create_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
@@ -228,14 +229,14 @@ class Mnet:
         packet_bytes = bytes(packet)
         
         # Log outgoing packet
-        if hasattr(self, '_log_callback'):
+        if self._log_callback:
             self._log_callback('TX', packet_bytes.hex(), str(packet))
         
         self.device.write(packet_bytes)
         response = self.read_packet()
         
         # Log incoming response
-        if hasattr(self, '_log_callback'):
+        if self._log_callback:
             response_bytes = bytes(response)
             self._log_callback('RX', response_bytes.hex(), str(response))
         
@@ -441,7 +442,7 @@ class Mnet:
             self.time_offset = controller_time - real_time
             
             # Log time offset to debug
-            if hasattr(self, '_debug_callback'):
+            if self._debug_callback:
                 self._debug_callback({
                     'request_data_id': 'TIME_OFFSET',
                     'request_sub_id': 0,
@@ -453,7 +454,7 @@ class Mnet:
                 })
         except Exception as e:
             self.time_offset = None
-            if hasattr(self, '_debug_callback'):
+            if self._debug_callback:
                 self._debug_callback({
                     'request_data_id': 'TIME_OFFSET',
                     'request_sub_id': 0,
@@ -494,7 +495,7 @@ class Mnet:
         decoded_data = self.decode(response.data, self.encoded_serial)
         
         # Log decrypted data (commented out to reduce serial log clutter)
-        # if hasattr(self, '_log_callback'):
+        # if self._log_callback:
         #     ascii_data = decoded_data.decode('ascii', errors='replace')
         #     abbreviated_ascii = ascii_data[:16] + ('...' if len(ascii_data) > 16 else '')
         #     self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {abbreviated_ascii}')
@@ -502,7 +503,7 @@ class Mnet:
         results = self.decode_multiple_data(decoded_data)
         
         # Log debug responses
-        if hasattr(self, '_debug_callback'):
+        if self._debug_callback:
             for i, (mainid, subid, (data_type, value)) in enumerate(results):
                 req_data_id = datasubids[i][0].hex() if i < len(datasubids) else 'unknown'
                 req_sub_id = datasubids[i][1] if i < len(datasubids) else 'unknown'

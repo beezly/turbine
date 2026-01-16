@@ -2,9 +2,49 @@
 Pytest configuration and shared fixtures for mnet tests.
 """
 
+import os
+from pathlib import Path
+
 import pytest
 from unittest.mock import Mock
 import struct
+
+
+def load_dotenv():
+    """Load environment variables from .env file if it exists."""
+    env_path = Path(__file__).parent.parent / '.env'
+    if env_path.exists():
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    os.environ.setdefault(key.strip(), value.strip())
+
+
+# Load .env at module import time
+load_dotenv()
+
+
+@pytest.fixture
+def turbine_connection():
+    """Provide turbine connection parameters from environment.
+
+    Returns tuple of (host, port) or None if not configured.
+    """
+    host = os.environ.get('TURBINE_HOST')
+    port = os.environ.get('TURBINE_PORT')
+    if host and port:
+        return (host, int(port))
+    return None
+
+
+@pytest.fixture
+def require_turbine(turbine_connection):
+    """Skip test if turbine connection is not configured."""
+    if turbine_connection is None:
+        pytest.skip("TURBINE_HOST and TURBINE_PORT not configured in .env")
+    return turbine_connection
 
 
 @pytest.fixture
