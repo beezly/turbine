@@ -22,7 +22,7 @@ def run_tests(coverage=False, verbose=False, specific_test=None):
     if specific_test:
         cmd.append(specific_test)
     else:
-        cmd.append('test_mnet.py')
+        cmd.append('tests')
     
     print(f"Running: {' '.join(cmd)}")
     result = subprocess.run(cmd)

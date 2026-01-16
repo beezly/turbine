@@ -75,23 +75,24 @@ class TestMnetLogin(unittest.TestCase):
     def test_login_with_fresh_instance(self):
         """Test login with fresh instance that needs serial number."""
         mnet_instance = Mnet(self.mock_serial)
-        
+
         # Mock serial number response
         serial_response = Mock()
         serial_response.data = struct.pack('!L', 12345678)
-        
-        with patch.object(mnet_instance, 'send_packet') as mock_send:
-            # First call for serial number, second for login
-            mock_send.side_effect = [serial_response, Mock()]
-            
-            with patch.object(mnet_instance, 'encode', return_value=b'encoded'):
-                result = mnet_instance.login(self.destination)
-                
-                # Should have called send_packet twice (serial + login)
-                self.assertEqual(mock_send.call_count, 2)
-                
-                # First call should be for serial number
-                first_call_args = mock_send.call_args_list[0][0]
+
+        with patch.object(mnet_instance, '_initialize_time_offset'):
+            with patch.object(mnet_instance, 'send_packet') as mock_send:
+                # First call for serial number, second for login
+                mock_send.side_effect = [serial_response, Mock()]
+
+                with patch.object(mnet_instance, 'encode', return_value=b'encoded'):
+                    result = mnet_instance.login(self.destination)
+
+                    # Should have called send_packet twice (serial + login)
+                    self.assertEqual(mock_send.call_count, 2)
+
+                    # First call should be for serial number
+                    first_call_args = mock_send.call_args_list[0][0]
                 self.assertEqual(first_call_args[1], mnet_instance.REQ_SERIAL_NUMBER)
                 
                 # Second call should be for login

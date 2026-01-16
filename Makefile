@@ -6,25 +6,25 @@ install-test-deps:
 
 # Run basic tests
 test:
-	python -m pytest test_mnet.py
+	python -m pytest tests/test_mnet.py
 
 # Run tests with coverage
 test-coverage:
-	python -m pytest --cov=mnet --cov-report=html --cov-report=term test_mnet.py
+	python -m pytest --cov=mnet --cov-report=html --cov-report=term tests/test_mnet.py
 
 # Run tests with verbose output
 test-verbose:
-	python -m pytest -v test_mnet.py
+	python -m pytest -v tests/test_mnet.py
 
 # Run specific test class
 test-packet:
-	python -m pytest test_mnet.py::TestMnetPacket -v
+	python -m pytest tests/test_mnet.py::TestMnetPacket -v
 
 test-main:
-	python -m pytest test_mnet.py::TestMnet -v
+	python -m pytest tests/test_mnet.py::TestMnet -v
 
 test-integration:
-	python -m pytest test_mnet.py::TestMnetIntegration -v
+	python -m pytest tests/test_mnet.py::TestMnetIntegration -v
 
 # Clean up test artifacts
 clean:
