@@ -132,6 +132,20 @@ class TurbineMonitor:
         @self.socketio.on('command')
         def handle_command(command):
             self._handle_socket_command(command)
+
+        @self.socketio.on('get_events')
+        def handle_get_events(data):
+            """Fetch events from the event stack."""
+            limit = data.get('limit', 10) if data else 10
+            events = self._fetch_events(limit)
+            emit('events', events)
+
+        @self.socketio.on('get_alarms')
+        def handle_get_alarms(data):
+            """Fetch alarm history."""
+            only_occurred = data.get('only_occurred', True) if data else True
+            alarms = self._fetch_alarm_history(only_occurred)
+            emit('alarms', alarms)
     
     def _log_mqtt(self, direction: str, topic: str, payload: str):
         """Log MQTT activity."""
@@ -256,7 +270,57 @@ class TurbineMonitor:
         except Exception as e:
             self.logger.error(f"Error handling socket command: {e}")
             self.logger.error(traceback.format_exc())
-    
+
+    def _fetch_events(self, limit: int = 10) -> list:
+        """Fetch events from the event stack.
+
+        Args:
+            limit: Maximum number of events to fetch
+
+        Returns:
+            List of event dictionaries
+        """
+        events = []
+        try:
+            self._clear_serial_buffers()
+            for event in self.mnet_client.get_events(self.DESTINATION, limit=limit):
+                events.append({
+                    'index': event.index,
+                    'code': event.code,
+                    'timestamp': event.timestamp.isoformat() if event.timestamp else None,
+                    'text': event.text
+                })
+                time.sleep(0.05)  # Small delay between requests
+        except Exception as e:
+            self.logger.error(f"Error fetching events: {e}")
+            self.logger.error(traceback.format_exc())
+        return events
+
+    def _fetch_alarm_history(self, only_occurred: bool = True) -> list:
+        """Fetch alarm history.
+
+        Args:
+            only_occurred: Only return alarms that have occurred
+
+        Returns:
+            List of alarm record dictionaries
+        """
+        alarms = []
+        try:
+            self._clear_serial_buffers()
+            for alarm in self.mnet_client.get_alarm_history(self.DESTINATION, only_occurred=only_occurred):
+                alarms.append({
+                    'sub_id': alarm.sub_id,
+                    'last_occurred': alarm.last_occurred.isoformat() if alarm.last_occurred else None,
+                    'description': alarm.description,
+                    'has_occurred': alarm.has_occurred
+                })
+                time.sleep(0.05)  # Small delay between requests
+        except Exception as e:
+            self.logger.error(f"Error fetching alarm history: {e}")
+            self.logger.error(traceback.format_exc())
+        return alarms
+
     def _clear_serial_buffers(self):
         """Clear serial input/output buffers to prevent timing issues."""
         # Only applies to real serial devices, not network connections
@@ -315,9 +379,7 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_L1V, mnet.Mnet.DATA_AVERAGING_CURRENT),
             (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_CURRENT),
             (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_CURRENT),
-            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 2),
-            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 1),
-            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, 0),
+            (mnet.Mnet.DATA_ID_EVENT_STACK_STATUS_CODE, mnet.Mnet.EVENT_STACK_SUBID_TEXT),  # Latest event text
             (mnet.Mnet.DATA_ID_CONTROLLER_TIME, 0),
             (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 0),
             (mnet.Mnet.DATA_ID_CURRENT_STATUS_CODE, 1),
@@ -326,9 +388,12 @@ class TurbineMonitor:
             (mnet.Mnet.DATA_ID_L2V, mnet.Mnet.DATA_AVERAGING_1MIN),
             (mnet.Mnet.DATA_ID_L3V, mnet.Mnet.DATA_AVERAGING_1MIN)
         ]
-        
+
         results = self.mnet_client.request_multiple_data(self.DESTINATION, all_requests)
-        
+
+        # Latest event text for quick display
+        event_text = results[7].strip() if isinstance(results[7], str) else str(results[7]).strip()
+
         data = {
             'wind_speed_mps': results[0],
             'rotor_rpm': results[1],
@@ -337,18 +402,16 @@ class TurbineMonitor:
             'l1v': results[4],
             'l2v': results[5],
             'l3v': results[6],
-            'status_message': results[7].strip() if isinstance(results[7], str) else str(results[7]).strip(),
-            'event_stack_2': results[7],
-            'event_stack_1': results[8],
-            'event_stack_0': results[9],
-            'controller_time': datetime.strptime(results[10], "%y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S UTC") if results[10] else None,
-            'current_status_code_0': results[11],
-            'current_status_code_1': results[12],
-            # 1-minute averages
-            'power_W_10min': results[13],
-            'l1v_1min': results[14],
-            'l2v_1min': results[15],
-            'l3v_1min': results[16]
+            'status_message': event_text,
+            'event_stack_0': event_text,
+            'controller_time': datetime.strptime(results[8], "%y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S UTC") if results[8] else None,
+            'current_status_code_0': results[9],
+            'current_status_code_1': results[10],
+            # 10-minute and 1-minute averages
+            'power_W_10min': results[11],
+            'l1v_1min': results[12],
+            'l2v_1min': results[13],
+            'l3v_1min': results[14]
         }
         
         # Safe formatting for None values

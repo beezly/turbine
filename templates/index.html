@@ -562,6 +562,223 @@
         .log-panel { display: none; }
         .log-panel.active { display: block; }
 
+        /* History section (Events & Alarms) */
+        .history-section {
+            grid-column: 1 / -1;
+            animation: fadeSlideUp 0.6s ease-out 0.35s both;
+        }
+
+        .history-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+
+        .history-tab {
+            padding: 10px 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .history-tab:hover {
+            border-color: var(--border-glow);
+            color: var(--text-primary);
+        }
+
+        .history-tab.active {
+            background: rgba(56, 189, 248, 0.1);
+            border-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+        }
+
+        .history-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 16px;
+            overflow: hidden;
+        }
+
+        .history-panel {
+            display: none;
+        }
+
+        .history-panel.active {
+            display: block;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-subtle);
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .history-info {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .history-controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .history-select {
+            padding: 6px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            font-family: 'Outfit', sans-serif;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .history-select:hover {
+            border-color: var(--border-glow);
+        }
+
+        .history-checkbox {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+        }
+
+        .history-checkbox input {
+            accent-color: var(--accent-cyan);
+        }
+
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 0.8rem;
+        }
+
+        .btn-icon {
+            display: inline-block;
+            margin-right: 4px;
+        }
+
+        .history-list {
+            max-height: 400px;
+            overflow-y: auto;
+            padding: 12px;
+        }
+
+        .history-list::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .history-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .history-list::-webkit-scrollbar-thumb {
+            background: var(--border-subtle);
+            border-radius: 4px;
+        }
+
+        .history-placeholder {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 40px;
+            font-size: 0.875rem;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            transition: background 0.2s ease;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .history-item:hover {
+            background: rgba(0, 0, 0, 0.2);
+        }
+
+        .history-item-index {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            background: rgba(56, 189, 248, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            min-width: 28px;
+            text-align: center;
+        }
+
+        .history-item-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .history-item-text {
+            font-size: 0.85rem;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .history-item-meta {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+
+        .history-item-code {
+            display: inline-block;
+            background: rgba(251, 191, 36, 0.1);
+            color: var(--accent-amber);
+            padding: 1px 6px;
+            border-radius: 4px;
+            margin-right: 8px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+        }
+
+        .alarm-item {
+            border-left: 3px solid var(--accent-rose);
+            padding-left: 12px;
+        }
+
+        .alarm-item.never-occurred {
+            border-left-color: var(--text-muted);
+            opacity: 0.6;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            border: 2px solid var(--border-subtle);
+            border-top-color: var(--accent-cyan);
+            border-radius: 50%;
+            animation: spinner 0.8s linear infinite;
+            margin-right: 6px;
+        }
+
+        @keyframes spinner {
+            to { transform: rotate(360deg); }
+        }
+
         /* Responsive */
         @media (max-width: 1200px) {
             .dashboard {
@@ -767,19 +984,57 @@
 
                 <div class="status-card">
                     <div class="card-header">
-                        <span class="card-title">Event Stack</span>
+                        <span class="card-title">Recent Event</span>
                     </div>
                     <div class="status-item">
                         <span class="status-item-label">Latest</span>
                         <span id="eventStack0" class="status-item-value">--</span>
                     </div>
-                    <div class="status-item">
-                        <span class="status-item-label">Previous</span>
-                        <span id="eventStack1" class="status-item-value">--</span>
+                </div>
+            </div>
+
+            <!-- Event History & Alarm History -->
+            <div class="history-section">
+                <div class="history-tabs">
+                    <button class="history-tab active" onclick="switchHistoryTab('events')">Event Stack</button>
+                    <button class="history-tab" onclick="switchHistoryTab('alarms')">Alarm History</button>
+                </div>
+                <div class="history-container">
+                    <div id="eventsPanel" class="history-panel active">
+                        <div class="history-header">
+                            <span class="history-info" id="eventsInfo">Click refresh to load events</span>
+                            <div class="history-controls">
+                                <select id="eventsLimit" class="history-select">
+                                    <option value="10">10 events</option>
+                                    <option value="25">25 events</option>
+                                    <option value="50">50 events</option>
+                                    <option value="100">100 events</option>
+                                </select>
+                                <button class="btn btn-ghost btn-sm" onclick="loadEvents()" id="loadEventsBtn">
+                                    <span class="btn-icon">&#8635;</span> Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div id="eventsList" class="history-list">
+                            <div class="history-placeholder">No events loaded</div>
+                        </div>
                     </div>
-                    <div class="status-item">
-                        <span class="status-item-label">Earlier</span>
-                        <span id="eventStack2" class="status-item-value">--</span>
+                    <div id="alarmsPanel" class="history-panel">
+                        <div class="history-header">
+                            <span class="history-info" id="alarmsInfo">Click refresh to load alarm history</span>
+                            <div class="history-controls">
+                                <label class="history-checkbox">
+                                    <input type="checkbox" id="onlyOccurred" checked>
+                                    Only occurred
+                                </label>
+                                <button class="btn btn-ghost btn-sm" onclick="loadAlarms()" id="loadAlarmsBtn">
+                                    <span class="btn-icon">&#8635;</span> Refresh
+                                </button>
+                            </div>
+                        </div>
+                        <div id="alarmsList" class="history-list">
+                            <div class="history-placeholder">No alarms loaded</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -843,12 +1098,10 @@
             updateMetric('l3v', data.l3v, 0, ' V');
 
             document.getElementById('statusMessage').textContent = data.status_message || '--';
-            document.getElementById('eventStack2').textContent = data.event_stack_2 || '--';
-            document.getElementById('eventStack1').textContent = data.event_stack_1 || '--';
             document.getElementById('eventStack0').textContent = data.event_stack_0 || '--';
             document.getElementById('controllerTime').textContent = data.controller_time || '--';
 
-            updateMetric('power1min', data.power_W_1min, 0, ' W');
+            updateMetric('power1min', data.power_W_10min, 0, ' W');
             updateMetric('l1v1min', data.l1v_1min, 0, ' V');
             updateMetric('l2v1min', data.l2v_1min, 0, ' V');
             updateMetric('l3v1min', data.l3v_1min, 0, ' V');
@@ -932,6 +1185,116 @@
 
         function sendCommand(command) {
             socket.emit('command', command);
+        }
+
+        // History tab switching
+        function switchHistoryTab(tab) {
+            document.querySelectorAll('.history-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.history-panel').forEach(p => p.classList.remove('active'));
+
+            event.target.classList.add('active');
+            document.getElementById(tab + 'Panel').classList.add('active');
+        }
+
+        // Load events from turbine
+        function loadEvents() {
+            const limit = parseInt(document.getElementById('eventsLimit').value);
+            const btn = document.getElementById('loadEventsBtn');
+            const info = document.getElementById('eventsInfo');
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            info.textContent = 'Fetching events from turbine...';
+
+            socket.emit('get_events', { limit: limit });
+        }
+
+        // Handle events response
+        socket.on('events', function(events) {
+            const list = document.getElementById('eventsList');
+            const info = document.getElementById('eventsInfo');
+            const btn = document.getElementById('loadEventsBtn');
+
+            btn.disabled = false;
+            btn.innerHTML = '<span class="btn-icon">&#8635;</span> Refresh';
+
+            if (!events || events.length === 0) {
+                list.innerHTML = '<div class="history-placeholder">No events found</div>';
+                info.textContent = 'No events in stack';
+                return;
+            }
+
+            info.textContent = `Showing ${events.length} events`;
+            list.innerHTML = events.map(event => {
+                const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleString() : 'Unknown';
+                return `
+                    <div class="history-item">
+                        <span class="history-item-index">${event.index}</span>
+                        <div class="history-item-content">
+                            <div class="history-item-text">${escapeHtml(event.text)}</div>
+                            <div class="history-item-meta">
+                                <span class="history-item-code">Code ${event.code}</span>
+                                ${timestamp}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        });
+
+        // Load alarms from turbine
+        function loadAlarms() {
+            const onlyOccurred = document.getElementById('onlyOccurred').checked;
+            const btn = document.getElementById('loadAlarmsBtn');
+            const info = document.getElementById('alarmsInfo');
+
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loading-spinner"></span> Loading...';
+            info.textContent = 'Fetching alarm history from turbine...';
+
+            socket.emit('get_alarms', { only_occurred: onlyOccurred });
+        }
+
+        // Handle alarms response
+        socket.on('alarms', function(alarms) {
+            const list = document.getElementById('alarmsList');
+            const info = document.getElementById('alarmsInfo');
+            const btn = document.getElementById('loadAlarmsBtn');
+
+            btn.disabled = false;
+            btn.innerHTML = '<span class="btn-icon">&#8635;</span> Refresh';
+
+            if (!alarms || alarms.length === 0) {
+                list.innerHTML = '<div class="history-placeholder">No alarms found</div>';
+                info.textContent = 'No alarm history';
+                return;
+            }
+
+            const occurredCount = alarms.filter(a => a.has_occurred).length;
+            info.textContent = `${occurredCount} alarms have occurred (${alarms.length} total)`;
+
+            list.innerHTML = alarms.map(alarm => {
+                const timestamp = alarm.last_occurred ? new Date(alarm.last_occurred).toLocaleString() : 'Never';
+                const occurredClass = alarm.has_occurred ? '' : 'never-occurred';
+                return `
+                    <div class="history-item alarm-item ${occurredClass}">
+                        <span class="history-item-index">${alarm.sub_id}</span>
+                        <div class="history-item-content">
+                            <div class="history-item-text">${escapeHtml(alarm.description)}</div>
+                            <div class="history-item-meta">
+                                ${alarm.has_occurred ? 'Last occurred: ' + timestamp : 'Never occurred'}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        });
+
+        // Escape HTML to prevent XSS
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
     </script>
 </body>
