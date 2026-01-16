@@ -30,6 +30,7 @@ class TurbineMonitor:
     POLL_INTERVAL = 1.0
     ERROR_RETRY_DELAY = 10.0
     INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
+    TIME_SYNC_INTERVAL = 14400  # Sync controller time every 4 hours (in seconds)
 
     def __init__(self, connection: str, mqtt_host: str, web_port: int = 5000):
         """Initialize turbine monitor.
@@ -45,6 +46,7 @@ class TurbineMonitor:
         self.web_port = web_port
         self.pending_command: Optional[bytes] = None
         self.last_time_offset_update: Optional[datetime] = None
+        self.last_time_sync: Optional[datetime] = None
         self.logger = self._setup_logging()
 
         # Monitoring data
@@ -287,7 +289,22 @@ class TurbineMonitor:
                 self.logger.error(traceback.format_exc())
             finally:
                 self.pending_command = None
-    
+
+    def _sync_controller_time(self):
+        """Sync controller time to current UTC if interval has elapsed."""
+        now = datetime.now()
+        if (self.last_time_sync is None or
+            (now - self.last_time_sync).total_seconds() >= self.TIME_SYNC_INTERVAL):
+            try:
+                self._clear_serial_buffers()
+                self.logger.info("Syncing controller time to UTC")
+                self.mnet_client.set_controller_time(self.DESTINATION)
+                self.last_time_sync = now
+                self.logger.info("Controller time synced successfully")
+            except Exception as e:
+                self.logger.error(f"Failed to sync controller time: {e}")
+                self.logger.error(traceback.format_exc())
+
     def _collect_turbine_data(self) -> Dict[str, Any]:
         """Collect all turbine data using single multiple request."""
         # Update time offset once per 24 hours
@@ -395,7 +412,10 @@ class TurbineMonitor:
             try:
                 # Execute any pending commands
                 self._execute_pending_command()
-                
+
+                # Sync controller time periodically
+                self._sync_controller_time()
+
                 # Collect and publish data
                 turbine_data = self._collect_turbine_data()
                 self._publish_data(turbine_data)
@@ -435,12 +455,15 @@ def main():
     connection = os.environ.get('TURBINE_CONNECTION', '/dev/ttyUSB0')
     mqtt_host = os.environ.get('MQTT_HOST', 'mqtt.lan')
     web_port = int(os.environ.get('WEB_PORT', '5000'))
+    time_sync_interval = int(os.environ.get('TIME_SYNC_INTERVAL', '14400'))  # 4 hours default
 
     print(f"Turbine connection: {connection}")
     print(f"MQTT host: {mqtt_host}")
     print(f"Web port: {web_port}")
+    print(f"Time sync interval: {time_sync_interval}s ({time_sync_interval/3600:.1f}h)")
 
     monitor = TurbineMonitor(connection, mqtt_host, web_port)
+    monitor.TIME_SYNC_INTERVAL = time_sync_interval
 
     try:
         monitor.run()
