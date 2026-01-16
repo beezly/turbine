@@ -341,7 +341,7 @@ class TurbineMonitor:
             'event_stack_2': results[7],
             'event_stack_1': results[8],
             'event_stack_0': results[9],
-            'controller_time': results[10],
+            'controller_time': datetime.strptime(results[10], "%y%m%d%H%M%S").strftime("%Y-%m-%d %H:%M:%S UTC") if results[10] else None,
             'current_status_code_0': results[11],
             'current_status_code_1': results[12],
             # 1-minute averages
