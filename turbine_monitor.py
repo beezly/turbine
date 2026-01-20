@@ -209,7 +209,7 @@ class TurbineMonitor:
         resp_sub = serializable_data.get('response_subid', 'unknown')
         value = serializable_data.get('value', 'unknown')
         data_type = serializable_data.get('data_type', 'unknown')
-        self.logger.info(f"DEBUG: REQ[{req_id}:{req_sub}] -> RSP[{resp_main}:{resp_sub}] = {value} (type:{data_type})")
+        self.logger.debug(f"REQ[{req_id}:{req_sub}] -> RSP[{resp_main}:{resp_sub}] = {value} (type:{data_type})")
     
     def _setup_mqtt(self) -> mqtt.Client:
         """Setup MQTT client."""
