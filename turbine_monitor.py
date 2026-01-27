@@ -494,6 +494,19 @@ class TurbineMonitor:
                 
                 time.sleep(self.POLL_INTERVAL)
                 
+            except (BrokenPipeError, ConnectionError, OSError) as e:
+                self.logger.error(f"Connection error: {e}")
+                self.status['connected'] = False
+                self.socketio.emit('status', self.status)
+                time.sleep(self.ERROR_RETRY_DELAY)
+
+                # Attempt reconnection
+                try:
+                    self._reconnect_device()
+                except Exception as reconnect_error:
+                    self.logger.error(f"Reconnection failed: {reconnect_error}")
+                    self.logger.error(traceback.format_exc())
+
             except Exception as e:
                 self.logger.error(f"Monitor loop error: {e}")
                 self.logger.error(traceback.format_exc())
@@ -501,6 +514,35 @@ class TurbineMonitor:
                 self.socketio.emit('status', self.status)
                 time.sleep(self.ERROR_RETRY_DELAY)
     
+    def _reconnect_device(self):
+        """Reconnect to the serial/network device after connection loss."""
+        self.logger.info("Attempting to reconnect to turbine...")
+
+        # Reconnect if NetworkSerial, otherwise recreate the device
+        if hasattr(self.serial_device, 'reconnect'):
+            self.serial_device.reconnect()
+        else:
+            # For serial devices, close and recreate
+            try:
+                self.serial_device.close()
+            except Exception:
+                pass
+            self.serial_device = self._create_device(self.connection)
+            self.mnet_client.device = self.serial_device
+
+        # Reset mnet_client state so serial number is re-fetched
+        self.mnet_client.serial = None
+        self.mnet_client.encoded_serial = None
+        self.mnet_client._alarm_description_cache.clear()
+
+        # Re-fetch serial number and re-login
+        self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
+        self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
+        self.logger.info(f"Reconnected to turbine serial: {self.serial_number}")
+
+        self._login_to_turbine()
+        self.logger.info("Reconnection successful")
+
     def close(self):
         """Clean shutdown."""
         self.logger.info("Shutting down turbine monitor")

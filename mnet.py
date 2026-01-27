@@ -49,6 +49,11 @@ class NetworkSerial:
         self._socket.settimeout(self.timeout)
         self._socket.connect((self.host, self.port))
 
+    def reconnect(self) -> None:
+        """Close existing connection and establish a new one."""
+        self.close()
+        self.connect()
+
     def close(self) -> None:
         """Close the connection."""
         if self._socket:

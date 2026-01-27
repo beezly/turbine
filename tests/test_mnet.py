@@ -51,6 +51,25 @@ class TestNetworkSerial(unittest.TestCase):
         self.assertFalse(ns.is_connected)
 
     @patch('mnet.socket.socket')
+    def test_reconnect(self, mock_socket_class):
+        """Test reconnection closes old socket and creates new one."""
+        mock_socket1 = Mock()
+        mock_socket2 = Mock()
+        mock_socket_class.side_effect = [mock_socket1, mock_socket2]
+
+        ns = NetworkSerial('localhost', 3000)
+        ns.connect()
+        self.assertTrue(ns.is_connected)
+
+        # Reconnect should close old and create new
+        ns.reconnect()
+
+        mock_socket1.close.assert_called_once()
+        mock_socket2.settimeout.assert_called_once_with(5.0)
+        mock_socket2.connect.assert_called_once_with(('localhost', 3000))
+        self.assertTrue(ns.is_connected)
+
+    @patch('mnet.socket.socket')
     def test_read(self, mock_socket_class):
         """Test reading data."""
         mock_socket = Mock()
