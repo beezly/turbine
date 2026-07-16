@@ -253,9 +253,21 @@ class TurbineMonitor:
                                 hits.append({'id': mid.hex(), 'sub': sid, 'value': val})
                     except Exception:
                         fell_back += 1
+                        # A bad multi-data reply (e.g. a string-type register) desyncs the
+                        # ser2net stream; the network buffer-clear is a no-op, so reconnect
+                        # to resync, then warm up before the single-read fallback.
+                        try:
+                            if hasattr(self.serial_device, 'reconnect'):
+                                self.serial_device.reconnect()
+                                time.sleep(0.3)
+                                try:
+                                    self.mnet_client.send_packet(self.DESTINATION, b'\x0c\x2e', b'')
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         for w in ids:
                             try:
-                                self._clear_serial_buffers()
                                 payload = w.to_bytes(2, 'big') + sub.to_bytes(2, 'big')
                                 resp = self.mnet_client.send_packet(self.DESTINATION, b'\x0c\x28', payload)
                                 dec = self.mnet_client.decode(resp.data, self.mnet_client.encoded_serial)
