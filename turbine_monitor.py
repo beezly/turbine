@@ -11,7 +11,7 @@ import time
 import threading
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 import paho.mqtt.client as mqtt
@@ -32,7 +32,17 @@ class TurbineMonitor:
     INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
     TIME_SYNC_INTERVAL = 14400  # Sync controller time every 4 hours (in seconds)
 
-    def __init__(self, connection: str, mqtt_host: str, web_port: int = 5000):
+    # Control commands (require the standard/control login; see _execute_pending_command)
+    COMMAND_MAP = {
+        'start': mnet.Mnet.DATA_ID_START,
+        'stop': mnet.Mnet.DATA_ID_STOP,
+        'reset': mnet.Mnet.DATA_ID_RESET,
+        'manual_start': mnet.Mnet.DATA_ID_MANUAL_START,
+        'ack': mnet.Mnet.DATA_ID_ACK_ALARM,
+    }
+
+    def __init__(self, connection: str, mqtt_host: str, web_port: int = 5000,
+                 control_password: Optional[str] = None):
         """Initialize turbine monitor.
 
         Args:
@@ -40,11 +50,20 @@ class TurbineMonitor:
                        network address (e.g., 'host:port' or 'tcp://host:port')
             mqtt_host: MQTT broker hostname
             web_port: Web interface port (default 5000)
+            control_password: per-turbine Turbine Password. When set, control
+                commands elevate to a standard (0x138E) login for the command and
+                then drop back to the hidden read-only login. When None, control
+                commands are refused (monitor stays read-only).
         """
         self.connection = connection
         self.mqtt_host = mqtt_host
         self.web_port = web_port
+        self.control_password = control_password
         self.pending_command: Optional[bytes] = None
+        self.pending_command_name: Optional[str] = None
+        # Login state broadcast to the UI: mode in hidden|elevating|control|command|reverting
+        self.login_state = {'mode': 'hidden', 'detail': 'monitoring (read-only)',
+                            'control_available': bool(control_password), 'ts': None}
         self.last_time_sync: Optional[datetime] = None
         self.logger = self._setup_logging()
 
@@ -124,6 +143,7 @@ class TurbineMonitor:
         def handle_connect():
             emit('status', self.status)
             emit('data', self.latest_data)
+            emit('login_state', self.login_state)
         
         @self.socketio.on('toggle_debug')
         def handle_toggle_debug(enabled):
@@ -232,42 +252,30 @@ class TurbineMonitor:
             self._log_mqtt('RX', message.topic, command)
             self.logger.info(f"Received command: {command}")
             
-            command_map = {
-                'start': mnet.Mnet.DATA_ID_START,
-                'stop': mnet.Mnet.DATA_ID_STOP,
-                'reset': mnet.Mnet.DATA_ID_RESET,
-                'manual_start': mnet.Mnet.DATA_ID_MANUAL_START
-            }
-            
-            if command in command_map:
-                self.pending_command = command_map[command]
+            if command in self.COMMAND_MAP:
+                self.pending_command = self.COMMAND_MAP[command]
+                self.pending_command_name = command
                 self.logger.info(f"Queued command: {command}")
             else:
                 self.logger.warning(f"Unknown command: {command}")
-                
+
         except Exception as e:
             self.logger.error(f"Error handling command: {e}")
             self.logger.error(traceback.format_exc())
-    
+
     def _handle_socket_command(self, command: str):
         """Handle incoming socket command from web UI."""
         try:
             command = command.strip().lower()
             self.logger.info(f"Received socket command: {command}")
-            
-            command_map = {
-                'start': mnet.Mnet.DATA_ID_START,
-                'stop': mnet.Mnet.DATA_ID_STOP,
-                'reset': mnet.Mnet.DATA_ID_RESET,
-                'manual_start': mnet.Mnet.DATA_ID_MANUAL_START
-            }
-            
-            if command in command_map:
-                self.pending_command = command_map[command]
+
+            if command in self.COMMAND_MAP:
+                self.pending_command = self.COMMAND_MAP[command]
+                self.pending_command_name = command
                 self.logger.info(f"Queued socket command: {command}")
             else:
                 self.logger.warning(f"Unknown socket command: {command}")
-                
+
         except Exception as e:
             self.logger.error(f"Error handling socket command: {e}")
             self.logger.error(traceback.format_exc())
@@ -334,29 +342,72 @@ class TurbineMonitor:
             except Exception as e:
                 self.logger.warning(f"Buffer clear failed: {e}")
     
+    def _set_login_state(self, mode: str, detail: str = ''):
+        """Update and broadcast the current login/control state to the UI."""
+        self.login_state = {
+            'mode': mode,
+            'detail': detail,
+            'control_available': bool(self.control_password),
+            'ts': datetime.now(timezone.utc).isoformat(),
+        }
+        self.socketio.emit('login_state', self.login_state)
+
     def _login_to_turbine(self):
-        """Perform login to turbine."""
+        """Perform the hidden (read-only) login used for monitoring."""
         with self.serial_lock:
             self._clear_serial_buffers()
             self._log_serial('TX', 'LOGIN')
             self.mnet_client.login(self.DESTINATION)
             time.sleep(self.INTER_REQUEST_DELAY)
-    
+        self._set_login_state('hidden', 'monitoring (read-only)')
+
     def _execute_pending_command(self):
-        """Execute any pending command."""
-        if self.pending_command:
-            with self.serial_lock:
+        """Execute a pending control command by briefly elevating to a standard
+        (control) login for the command, then dropping back to the hidden login."""
+        if not self.pending_command:
+            return
+        cmd = self.pending_command
+        name = self.pending_command_name or 'command'
+        self.pending_command = None
+        self.pending_command_name = None
+
+        if not self.control_password:
+            self.logger.warning("Control command '%s' refused: no control password configured", name)
+            self.socketio.emit('command_result',
+                               {'command': name, 'ok': False, 'error': 'Control disabled (no password set)'})
+            self._set_login_state('hidden', 'control disabled (no password set)')
+            return
+
+        with self.serial_lock:
+            try:
+                self._clear_serial_buffers()
+                # 1. elevate to the standard (control) login
+                self._set_login_state('elevating', 'standard login (control)')
+                self.mnet_client.login_standard(self.DESTINATION, self.control_password)
+                time.sleep(self.INTER_REQUEST_DELAY)
+                self._set_login_state('control', 'control login active')
+                # 2. issue the command
+                self._set_login_state('command', f'sending {name.upper()}')
+                self.logger.info("Executing control command: %s", name)
+                result = self.mnet_client.send_command(self.DESTINATION, cmd)
+                reply = result.packet_type.hex()
+                self.logger.info("Command '%s' reply: %s", name, reply)
+                time.sleep(self.INTER_REQUEST_DELAY)
+                self.socketio.emit('command_result', {'command': name, 'ok': True, 'reply': reply})
+            except Exception as e:
+                self.logger.error("Command '%s' failed: %s", name, e)
+                self.logger.error(traceback.format_exc())
+                self.socketio.emit('command_result', {'command': name, 'ok': False, 'error': str(e)})
+            finally:
+                # 3. always drop back to the hidden read-only login
                 try:
+                    self._set_login_state('reverting', 'returning to hidden login')
                     self._clear_serial_buffers()
-                    self.logger.info(f"Executing command: {self.pending_command}")
-                    result = self.mnet_client.send_command(self.DESTINATION, self.pending_command)
-                    self.logger.info(f"Command result: {result}")
+                    self.mnet_client.login(self.DESTINATION)
                     time.sleep(self.INTER_REQUEST_DELAY)
                 except Exception as e:
-                    self.logger.error(f"Command execution failed: {e}")
-                    self.logger.error(traceback.format_exc())
-                finally:
-                    self.pending_command = None
+                    self.logger.error("Failed to revert to hidden login: %s", e)
+                self._set_login_state('hidden', 'monitoring (read-only)')
 
     def _sync_controller_time(self):
         """Sync controller time to current UTC if interval has elapsed."""
@@ -570,13 +621,15 @@ def main():
     mqtt_host = os.environ.get('MQTT_HOST', 'mqtt.lan')
     web_port = int(os.environ.get('WEB_PORT', '5000'))
     time_sync_interval = int(os.environ.get('TIME_SYNC_INTERVAL', '14400'))  # 4 hours default
+    control_password = os.environ.get('TURBINE_CONTROL_PASSWORD') or None
 
     print(f"Turbine connection: {connection}")
     print(f"MQTT host: {mqtt_host}")
     print(f"Web port: {web_port}")
     print(f"Time sync interval: {time_sync_interval}s ({time_sync_interval/3600:.1f}h)")
+    print(f"Control: {'ENABLED (password set)' if control_password else 'disabled (read-only; set TURBINE_CONTROL_PASSWORD to enable)'}")
 
-    monitor = TurbineMonitor(connection, mqtt_host, web_port)
+    monitor = TurbineMonitor(connection, mqtt_host, web_port, control_password=control_password)
     monitor.TIME_SYNC_INTERVAL = time_sync_interval
 
     try:

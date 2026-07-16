@@ -170,11 +170,17 @@ class Mnet:
     REQ_WRITE_DATA = b'\x0c\x2c'
     REQ_COMMAND = b'\x0c\x32'
     REQ_SERIAL_NUMBER = b'\x0c\x2e'
-    REQ_LOGIN = b'\x13\xa1'
-    
+    REQ_LOGIN = b'\x13\xa1'          # hidden login ("Remote hidden login"); password not validated -> level 0
+    REQ_LOGIN_STANDARD = b'\x13\x8e'  # standard login ("Remote login"); carries + validates the Turbine Password
+
     # Login constants
     LOGIN_131_GAIA_WIND = b'\x31\x33\x31\x20\x66\x6b\x59\x75\x29\x29\x31\x32\x32\x32\x31\x51\x51\x61\x61\x00'
+    # Payload offset 0x2a (big-endian dword). WPMS builder 0x59D2 fills this with the HASP
+    # dongle serial (sscanf "%lx" of the dongle string) or, with NO dongle, hardcodes 0x7B.
+    # So a dongle-less login (ours) must use 0x7B here to byte-match WPMS -- NOT the mfr code.
     LOGIN_PACKET_ID = 0x7b
+    # Turbine Password field is a 20-byte, NUL-terminated ASCII slot (max 19 chars).
+    LOGIN_PASSWORD_FIELD_LEN = 20
     
     # Data IDs
     DATA_ID_WIND_SPEED = b'\x9c\x43'
@@ -237,12 +243,14 @@ class Mnet:
     DATA_COMMAND_STOP = b'\x00\x02'
     DATA_COMMAND_RESET = b'\x00\x03'
     DATA_COMMAND_MANUAL_START = b'\x00\x04'
-    
+    DATA_COMMAND_ACK_ALARM = b'\x00\x0a'   # acknowledge alarm (value 10)
+
     # Command aliases for backward compatibility
     DATA_ID_START = DATA_COMMAND_START
     DATA_ID_STOP = DATA_COMMAND_STOP
     DATA_ID_RESET = DATA_COMMAND_RESET
     DATA_ID_MANUAL_START = DATA_COMMAND_MANUAL_START
+    DATA_ID_ACK_ALARM = DATA_COMMAND_ACK_ALARM
 
     # Data IDs that use data_type 6 (uint32) but should NOT be converted to datetime
     # These return numeric values even though the protocol marks them as "timestamp" type
@@ -569,7 +577,7 @@ class Mnet:
         return results
     
     def create_login_packet_data(self) -> bytes:
-        """Create login packet data."""
+        """Create hidden-login packet data (32 bytes, no password)."""
         return struct.pack('=20sBBBBBBBBBBBB',
                           self.LOGIN_131_GAIA_WIND,
                           0xff, 0xff,
@@ -578,6 +586,36 @@ class Mnet:
                           self.LOGIN_PACKET_ID >> 8,
                           self.LOGIN_PACKET_ID,
                           5, 0, 0, 0, 0, 0)
+
+    def create_login_packet_data_standard(self, password: str,
+                                           login_id: Optional[int] = None) -> bytes:
+        """Create standard-login packet data (52 bytes, WITH the Turbine Password).
+
+        Wire layout (verified from PRTCL001.PRO staging routine @0x59d2):
+            [0x00] 20 bytes  manufacturer credential (NUL-terminated)
+            [0x14] 20 bytes  Turbine Password (ASCII, NUL-terminated, max 19 chars)
+            [0x28] 0xFF 0xFF
+            [0x2a] 4 bytes   login-type id, big-endian (131 = Gaia Wind)
+            [0x2e] 0x05
+            [0x2f] 0x00 x5
+        The whole 52-byte payload is then serial-XOR encoded and sent as REQ_LOGIN_STANDARD.
+        """
+        if login_id is None:
+            login_id = self.LOGIN_PACKET_ID   # 0x7B, WPMS's no-dongle value for offset 0x2a
+        credential = self.LOGIN_131_GAIA_WIND.ljust(20, b'\x00')[:20]
+        # Accept str (latin-1, so 'ø' -> 0xF8) or raw bytes (full control over code page).
+        if isinstance(password, (bytes, bytearray)):
+            pw = bytes(password)[:self.LOGIN_PASSWORD_FIELD_LEN - 1]
+        else:
+            pw = password.encode('latin-1', errors='replace')[:self.LOGIN_PASSWORD_FIELD_LEN - 1]
+        pw_field = pw.ljust(self.LOGIN_PASSWORD_FIELD_LEN, b'\x00')
+        payload = (credential                       # [0x00] 20 bytes credential
+                   + pw_field                       # [0x14] 20 bytes password
+                   + b'\xff\xff'                    # [0x28] FF FF
+                   + struct.pack('>I', login_id)    # [0x2a] login id, big-endian
+                   + b'\x05\x00\x00\x00\x00\x00')   # [0x2e] 05 00 00 00 00 00
+        assert len(payload) == 52, f"login payload must be 52 bytes, got {len(payload)}"
+        return payload
     
     def _ensure_serial_available(self, destination: bytes) -> None:
         """Ensure serial number is available for encoding."""
@@ -646,10 +684,24 @@ class Mnet:
             return [value for _, _, (_, value) in results]
     
     def login(self, destination: bytes) -> MnetPacket:
-        """Perform login to device."""
+        """Perform hidden login to device (no password; grants read-only / level 0)."""
         self._ensure_serial_available(destination)
         login_data = self.encode(self.create_login_packet_data(), self.encoded_serial)
         return self.send_packet(destination, self.REQ_LOGIN, login_data)
+
+    def login_standard(self, destination: bytes, password: str,
+                        login_id: Optional[int] = None) -> MnetPacket:
+        """Perform standard login WITH the per-turbine Turbine Password.
+
+        The controller assigns the access level from the password (e.g. level 50),
+        so use this instead of login() when you need write access. Note the
+        controller caches the assigned level for ~2 minutes after the line drops,
+        so allow a cooldown between attempts with different passwords.
+        """
+        self._ensure_serial_available(destination)
+        payload = self.create_login_packet_data_standard(password, login_id)
+        login_data = self.encode(payload, self.encoded_serial)
+        return self.send_packet(destination, self.REQ_LOGIN_STANDARD, login_data)
     
     def get_controller_time(self, destination: bytes) -> datetime.datetime:
         """Get controller time and convert to datetime."""

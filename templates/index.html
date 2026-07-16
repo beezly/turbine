@@ -258,6 +258,33 @@
             color: var(--text-primary);
         }
 
+        .btn:disabled { opacity: 0.4; cursor: not-allowed; filter: grayscale(0.6); }
+
+        /* Login / control state indicator */
+        .login-state {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 5px 12px; margin: 4px 0 8px;
+            background: var(--bg-card); border: 1px solid var(--border-subtle);
+            border-radius: 999px; font-size: 13px;
+        }
+        .login-dot {
+            width: 9px; height: 9px; border-radius: 50%;
+            background: #6b7280; box-shadow: 0 0 6px currentColor; color: #6b7280;
+            transition: all .2s;
+        }
+        .login-dot.hidden    { background:#38bdf8; color:#38bdf8; }   /* read-only monitoring */
+        .login-dot.elevating,
+        .login-dot.reverting { background:#f59e0b; color:#f59e0b; animation: pulse 1s infinite; }
+        .login-dot.control   { background:#a855f7; color:#a855f7; }   /* control login active */
+        .login-dot.command   { background:#22c55e; color:#22c55e; animation: pulse .6s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+        .login-label  { font-weight: 600; color: var(--text-primary); }
+        .login-detail { color: var(--text-secondary); }
+        .command-feedback { min-height: 18px; margin: 2px 0 6px; font-size: 13px; }
+        .command-feedback.ok   { color: #22c55e; }
+        .command-feedback.err  { color: #ef4444; }
+        .command-feedback.busy { color: #f59e0b; }
+
         /* Main grid layout */
         .dashboard {
             display: grid;
@@ -943,12 +970,20 @@
                 </div>
                 <div id="lastUpdate" class="last-update"></div>
 
+                <div class="login-state" id="loginState" title="Login/control state">
+                    <span class="login-dot" id="loginDot"></span>
+                    <span class="login-label" id="loginLabel">Hidden login</span>
+                    <span class="login-detail" id="loginDetail">monitoring (read-only)</span>
+                </div>
+
                 <div class="controls">
                     <button class="btn btn-start" onclick="sendCommand('start')">Start</button>
                     <button class="btn btn-stop" onclick="sendCommand('stop')">Stop</button>
                     <button class="btn btn-reset" onclick="sendCommand('reset')">Reset</button>
                     <button class="btn btn-manual" onclick="sendCommand('manual_start')">Manual</button>
+                    <button class="btn btn-ghost" onclick="sendCommand('ack')">Ack&nbsp;Alarm</button>
                 </div>
+                <div class="command-feedback" id="commandFeedback"></div>
             </div>
         </header>
 
@@ -1346,9 +1381,56 @@
             }
         }
 
+        let controlAvailable = false;
+
         function sendCommand(command) {
+            const labels = { start:'Start', stop:'Stop', reset:'Reset', manual_start:'Manual start', ack:'Ack alarm' };
+            const label = labels[command] || command;
+            if (!controlAvailable) {
+                setFeedback('err', 'Control disabled — no control password configured on the monitor.');
+                return;
+            }
+            // Confirm the commands that move the turbine
+            if ((command === 'stop' || command === 'start' || command === 'manual_start') &&
+                !window.confirm(`Send ${label} to the turbine?`)) {
+                return;
+            }
+            setFeedback('busy', `Elevating to control login and sending ${label}…`);
             socket.emit('command', command);
         }
+
+        function setFeedback(kind, text) {
+            const el = document.getElementById('commandFeedback');
+            if (!el) return;
+            el.className = 'command-feedback ' + kind;
+            el.textContent = text;
+        }
+
+        // Login / control state indicator
+        const LOGIN_LABELS = {
+            hidden:    'Hidden login',
+            elevating: 'Elevating…',
+            control:   'Control login',
+            command:   'Sending command',
+            reverting: 'Reverting…',
+        };
+        socket.on('login_state', function(s) {
+            controlAvailable = !!s.control_available;
+            const dot = document.getElementById('loginDot');
+            const lab = document.getElementById('loginLabel');
+            const det = document.getElementById('loginDetail');
+            if (dot) dot.className = 'login-dot ' + (s.mode || 'hidden');
+            if (lab) lab.textContent = LOGIN_LABELS[s.mode] || s.mode;
+            if (det) det.textContent = s.detail || '';
+            // grey out control buttons when control isn't available
+            document.querySelectorAll('.controls .btn').forEach(function(b){ b.disabled = !controlAvailable; });
+        });
+
+        socket.on('command_result', function(r) {
+            const label = (r.command || 'command').toUpperCase();
+            if (r.ok) setFeedback('ok', `${label} sent — reply 0x${r.reply}. Back on hidden login.`);
+            else      setFeedback('err', `${label} failed: ${r.error || 'unknown error'}`);
+        });
 
         // History tab switching
         function switchHistoryTab(tab) {
