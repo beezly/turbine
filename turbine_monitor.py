@@ -221,6 +221,51 @@ class TurbineMonitor:
             return jsonify({'start': '%04x' % start, 'end': '%04x' % end, 'sub': sub,
                             'hit_count': len(hits), 'hits': hits})
 
+        @self.app.route('/api/multiscan')
+        def api_multiscan():
+            """Fast read-only sweep using REQ_MULTIPLE_DATA (0x0c2a) batches.
+            Params: start=<hex> end=<hex> sub=<int> batch=<int, default 32>.
+            Returns IDs that came back with a value. Range capped at 8192/call.
+            On a batch error, falls back to single reads so no ID is missed."""
+            try:
+                start = int(request.args.get('start', ''), 16)
+                end = int(request.args.get('end', ''), 16)
+                sub = int(request.args.get('sub', '0'), 0)
+                batch = max(1, min(int(request.args.get('batch', '32')), 60))
+            except Exception as e:
+                return jsonify({'error': f'bad params: {e}'}), 400
+            if not (0 <= start <= end <= 0xffff) or (end - start) > 8192:
+                return jsonify({'error': 'invalid range (max 8192 ids)'}), 400
+            hits, fell_back = [], 0
+            with self.serial_lock:
+                wid = start
+                while wid <= end:
+                    ids = list(range(wid, min(wid + batch, end + 1)))
+                    try:
+                        self._clear_serial_buffers()
+                        pairs = [(w.to_bytes(2, 'big'), sub) for w in ids]
+                        res = self.mnet_client.request_multiple_data(
+                            self.DESTINATION, pairs, include_ids=True)
+                        for mid, sid, val in res:
+                            if val is not None and val != '':
+                                hits.append({'id': mid.hex(), 'sub': sid, 'value': val})
+                    except Exception:
+                        fell_back += 1
+                        for w in ids:
+                            try:
+                                self._clear_serial_buffers()
+                                payload = w.to_bytes(2, 'big') + sub.to_bytes(2, 'big')
+                                resp = self.mnet_client.send_packet(self.DESTINATION, b'\x0c\x28', payload)
+                                dec = self.mnet_client.decode(resp.data, self.mnet_client.encoded_serial)
+                                if any(dec[1:]):
+                                    hits.append({'id': '%04x' % w, 'raw': dec.hex(' ')})
+                            except Exception:
+                                pass
+                    wid += batch
+            return jsonify({'start': '%04x' % start, 'end': '%04x' % end, 'sub': sub,
+                            'batch': batch, 'batches_fell_back': fell_back,
+                            'hit_count': len(hits), 'hits': hits})
+
         @self.socketio.on('connect')
         def handle_connect():
             emit('status', self.status)
