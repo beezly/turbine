@@ -61,6 +61,8 @@ class TurbineMonitor:
         self.control_password = control_password
         self.pending_command: Optional[bytes] = None
         self.pending_command_name: Optional[str] = None
+        self.last_command_result: Optional[dict] = None
+        self.command_lock = threading.Lock()  # serialize /api/command callers
         # Login state broadcast to the UI: mode in hidden|elevating|control|command|reverting
         self.login_state = {'mode': 'hidden', 'detail': 'monitoring (read-only)',
                             'control_available': bool(control_password), 'ts': None}
@@ -265,6 +267,35 @@ class TurbineMonitor:
             return jsonify({'start': '%04x' % start, 'end': '%04x' % end, 'sub': sub,
                             'batch': batch, 'batches_fell_back': fell_back,
                             'hit_count': len(hits), 'hits': hits})
+
+        @self.app.route('/api/command/<name>', methods=['POST'])
+        def api_command(name):
+            """Issue a control command through the monitor (elevate -> command ->
+            revert to hidden). Password-gated. Synchronous: waits for execution and
+            returns the result. Supply the control password via the
+            'X-Control-Password' header or a JSON body {"password": "..."}."""
+            name = (name or '').strip().lower()
+            if not self.control_password:
+                return jsonify({'error': 'control disabled (no TURBINE_CONTROL_PASSWORD set)'}), 403
+            supplied = request.headers.get('X-Control-Password')
+            if supplied is None and request.is_json:
+                supplied = (request.get_json(silent=True) or {}).get('password')
+            if supplied != self.control_password:
+                return jsonify({'error': 'unauthorized (bad or missing control password)'}), 401
+            if name not in self.COMMAND_MAP:
+                return jsonify({'error': 'unknown command: %s' % name,
+                                'valid': sorted(self.COMMAND_MAP)}), 400
+            with self.command_lock:
+                self.last_command_result = None
+                self.pending_command_name = name
+                self.pending_command = self.COMMAND_MAP[name]
+                deadline = time.time() + 20
+                while self.pending_command is not None and time.time() < deadline:
+                    time.sleep(0.1)
+                if self.pending_command is not None:
+                    return jsonify({'command': name, 'ok': False,
+                                    'error': 'timeout waiting for execution'}), 504
+                return jsonify(self.last_command_result or {'command': name, 'ok': True})
 
         @self.socketio.on('connect')
         def handle_connect():
@@ -520,11 +551,13 @@ class TurbineMonitor:
                 reply = result.packet_type.hex()
                 self.logger.info("Command '%s' reply: %s", name, reply)
                 time.sleep(self.INTER_REQUEST_DELAY)
-                self.socketio.emit('command_result', {'command': name, 'ok': True, 'reply': reply})
+                self.last_command_result = {'command': name, 'ok': True, 'reply': reply}
+                self.socketio.emit('command_result', self.last_command_result)
             except Exception as e:
                 self.logger.error("Command '%s' failed: %s", name, e)
                 self.logger.error(traceback.format_exc())
-                self.socketio.emit('command_result', {'command': name, 'ok': False, 'error': str(e)})
+                self.last_command_result = {'command': name, 'ok': False, 'error': str(e)}
+                self.socketio.emit('command_result', self.last_command_result)
             finally:
                 # 3. always drop back to the hidden read-only login
                 try:
