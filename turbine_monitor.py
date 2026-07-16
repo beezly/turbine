@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional
 
 import paho.mqtt.client as mqtt
 import serial
-from flask import Flask, render_template
+from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 
 import mnet
@@ -138,7 +138,89 @@ class TurbineMonitor:
         @self.app.route('/')
         def index():
             return render_template('index.html')
-        
+
+        @self.app.route('/api/read')
+        def api_read():
+            """Read-only data-probe: query an arbitrary data ID / read-type packet
+            through the live connection (no service restart needed).
+
+            Params:
+              id=<hex>    data ID (e.g. 9c43). Required for data reads.
+              sub=<int>   sub id (default 0)
+              type=<hex>  packet type, default 0c28 (REQ_DATA). Whitelisted read
+                          types only: 0c28 data, 0c2a multi, 0c04 menu, 0c05 screen,
+                          0c2e serial. Command/login/write types are refused.
+            """
+            READ_TYPES = {'0c28', '0c2a', '0c04', '0c05', '0c2e'}
+            try:
+                ptype_hex = request.args.get('type', '0c28').lower().replace('0x', '')
+                sub = int(request.args.get('sub', '0'), 0)
+                id_hex = request.args.get('id', '').lower().replace('0x', '')
+            except Exception as e:
+                return jsonify({'error': f'bad params: {e}'}), 400
+            if ptype_hex not in READ_TYPES:
+                return jsonify({'error': f'type {ptype_hex} not allowed (read-only endpoint)'}), 403
+            ptype = bytes.fromhex(ptype_hex)
+            needs_id = ptype_hex in ('0c28', '0c2a')
+            try:
+                did = bytes.fromhex(id_hex.zfill(4)) if id_hex else b''
+            except Exception as e:
+                return jsonify({'error': f'bad id: {e}'}), 400
+            if needs_id and len(did) != 2:
+                return jsonify({'error': 'id must be a 2-byte hex data ID (e.g. 9c43)'}), 400
+            payload = (did + sub.to_bytes(2, 'big')) if needs_id else b''
+            with self.serial_lock:
+                try:
+                    self._clear_serial_buffers()
+                    resp = self.mnet_client.send_packet(self.DESTINATION, ptype, payload)
+                    dec = self.mnet_client.decode(resp.data, self.mnet_client.encoded_serial)
+                    out = {
+                        'request': {'type': ptype_hex, 'id': id_hex, 'sub': sub},
+                        'reply_type': resp.packet_type.hex(),
+                        'raw': dec.hex(' '),
+                        'len': len(dec),
+                        'ascii': ''.join(chr(x) if 32 <= x < 127 else '.' for x in dec),
+                    }
+                    if needs_id:
+                        try:
+                            _, val = self.mnet_client.decode_data(dec, data_id=int.from_bytes(did, 'big'))
+                            out['value'] = val
+                        except Exception as e:
+                            out['value_error'] = str(e)
+                    time.sleep(self.INTER_REQUEST_DELAY)
+                    return jsonify(out)
+                except Exception as e:
+                    return jsonify({'error': str(e)}), 500
+
+        @self.app.route('/api/scan')
+        def api_scan():
+            """Read-only sweep of a data-ID range via REQ_DATA, returning only IDs
+            that reply with non-empty data. Params: start=<hex> end=<hex> sub=<int>.
+            Range capped at 512 IDs per call."""
+            try:
+                start = int(request.args.get('start', ''), 16)
+                end = int(request.args.get('end', ''), 16)
+                sub = int(request.args.get('sub', '0'), 0)
+            except Exception as e:
+                return jsonify({'error': f'bad params (need hex start/end): {e}'}), 400
+            if not (0 <= start <= end <= 0xffff) or (end - start) > 512:
+                return jsonify({'error': 'invalid range (max 512 ids, start<=end)'}), 400
+            hits = []
+            with self.serial_lock:
+                for wid in range(start, end + 1):
+                    try:
+                        self._clear_serial_buffers()
+                        payload = wid.to_bytes(2, 'big') + sub.to_bytes(2, 'big')
+                        resp = self.mnet_client.send_packet(self.DESTINATION, b'\x0c\x28', payload)
+                        dec = self.mnet_client.decode(resp.data, self.mnet_client.encoded_serial)
+                        # empty / "no such point" replies are all-zero 5-byte headers
+                        if any(dec[1:]) or (len(dec) > 5 and any(dec[5:])):
+                            hits.append({'id': '%04x' % wid, 'raw': dec.hex(' ')})
+                    except Exception:
+                        pass
+            return jsonify({'start': '%04x' % start, 'end': '%04x' % end, 'sub': sub,
+                            'hit_count': len(hits), 'hits': hits})
+
         @self.socketio.on('connect')
         def handle_connect():
             emit('status', self.status)
