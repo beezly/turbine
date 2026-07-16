@@ -244,6 +244,7 @@ class Mnet:
     DATA_COMMAND_RESET = b'\x00\x03'
     DATA_COMMAND_MANUAL_START = b'\x00\x04'
     DATA_COMMAND_ACK_ALARM = b'\x00\x0a'   # acknowledge alarm (value 10)
+    DATA_COMMAND_AUTO = b'\x00\x0e'        # return to automatic operation (value 14)
 
     # Command aliases for backward compatibility
     DATA_ID_START = DATA_COMMAND_START
@@ -251,6 +252,7 @@ class Mnet:
     DATA_ID_RESET = DATA_COMMAND_RESET
     DATA_ID_MANUAL_START = DATA_COMMAND_MANUAL_START
     DATA_ID_ACK_ALARM = DATA_COMMAND_ACK_ALARM
+    DATA_ID_AUTO = DATA_COMMAND_AUTO
 
     # Data IDs that use data_type 6 (uint32) but should NOT be converted to datetime
     # These return numeric values even though the protocol marks them as "timestamp" type

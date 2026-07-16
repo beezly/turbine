@@ -38,6 +38,7 @@ class TurbineMonitor:
         'stop': mnet.Mnet.DATA_ID_STOP,
         'reset': mnet.Mnet.DATA_ID_RESET,
         'manual_start': mnet.Mnet.DATA_ID_MANUAL_START,
+        'auto': mnet.Mnet.DATA_ID_AUTO,
         'ack': mnet.Mnet.DATA_ID_ACK_ALARM,
     }
 

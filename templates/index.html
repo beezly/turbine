@@ -981,6 +981,7 @@
                     <button class="btn btn-stop" onclick="sendCommand('stop')">Stop</button>
                     <button class="btn btn-reset" onclick="sendCommand('reset')">Reset</button>
                     <button class="btn btn-manual" onclick="sendCommand('manual_start')">Manual</button>
+                    <button class="btn btn-ghost" onclick="sendCommand('auto')">Auto</button>
                     <button class="btn btn-ghost" onclick="sendCommand('ack')">Ack&nbsp;Alarm</button>
                 </div>
                 <div class="command-feedback" id="commandFeedback"></div>
@@ -1384,14 +1385,14 @@
         let controlAvailable = false;
 
         function sendCommand(command) {
-            const labels = { start:'Start', stop:'Stop', reset:'Reset', manual_start:'Manual start', ack:'Ack alarm' };
+            const labels = { start:'Start', stop:'Stop', reset:'Reset', manual_start:'Manual start', auto:'Auto', ack:'Ack alarm' };
             const label = labels[command] || command;
             if (!controlAvailable) {
                 setFeedback('err', 'Control disabled — no control password configured on the monitor.');
                 return;
             }
-            // Confirm the commands that move the turbine
-            if ((command === 'stop' || command === 'start' || command === 'manual_start') &&
+            // Confirm the commands that move the turbine or change its operating mode
+            if ((command === 'stop' || command === 'start' || command === 'manual_start' || command === 'auto') &&
                 !window.confirm(`Send ${label} to the turbine?`)) {
                 return;
             }
