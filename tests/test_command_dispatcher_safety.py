@@ -551,7 +551,7 @@ class TestHttpTimeoutRace:
         blocker = monitor.command_dispatcher.submit('stop', 'mqtt')
         assert wait_for(lambda: monitor.command_dispatcher.get(blocker.request.id).state
                         == CommandState.EXECUTING)
-        resp = self._client(monitor).post('/api/command/start', headers={'X-Control-Password': SECRET})
+        resp = self._client(monitor).post('/api/command/start')
         body = resp.get_json()
         assert resp.status_code == 504
         assert body['state'] == 'cancelled' and body['ok'] is False
@@ -563,7 +563,7 @@ class TestHttpTimeoutRace:
     def test_timeout_while_executing_reports_executing_and_not_cancelled(self, monitor):
         gate = threading.Event()
         monitor.command_dispatcher._executor = lambda req: (gate.wait(5), {'ok': True})[1]
-        resp = self._client(monitor).post('/api/command/start', headers={'X-Control-Password': SECRET})
+        resp = self._client(monitor).post('/api/command/start')
         body = resp.get_json()
         assert resp.status_code == 504
         assert body['state'] == 'executing' and body['ok'] is False
@@ -582,63 +582,67 @@ class TestHttpTimeoutRace:
             return real_cancel(rid)
 
         monitor.command_dispatcher.cancel = racing_cancel
-        resp = self._client(monitor).post('/api/command/start', headers={'X-Control-Password': SECRET})
+        resp = self._client(monitor).post('/api/command/start')
         body = resp.get_json()
         assert resp.status_code == 200
         assert body['state'] == 'acknowledged' and body['ok'] is True
 
 
 class TestSocketAuthAndLegacy:
-    def test_dict_with_wrong_password_rejected_without_leak(self, monitor):
-        use_exec = Mock(return_value={'ok': True})
-        monitor.command_dispatcher._executor = use_exec
-        monitor._handle_socket_command({'command': 'start', 'password': WRONG})
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
-        time.sleep(0.1)
-        use_exec.assert_not_called()
-        assert not monitor.command_dispatcher._records
-        assert WRONG not in repr(monitor.socketio.emit.call_args_list)
-        assert WRONG not in repr(monitor.logger.method_calls)
-
-    def test_dict_with_correct_password_executes(self, monitor):
+    def test_dict_without_password_executes(self, monitor):
         monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
-        monitor._handle_socket_command({'command': 'start', 'password': SECRET})
+        monitor._handle_socket_command({'command': 'start'})
         rec = only_record(monitor)
         assert wait_terminal(monitor, rec.request.id).state == CommandState.ACKNOWLEDGED
         assert SECRET not in repr(monitor.socketio.emit.call_args_list)
         assert SECRET not in repr(monitor.logger.method_calls)
 
-    def test_dict_without_password_rejected(self, monitor):
-        monitor._handle_socket_command({'command': 'start'})
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
-        assert not monitor.command_dispatcher._records
+    def test_caller_supplied_password_is_ignored_and_never_leaks(self, monitor):
+        monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
+        monitor._handle_socket_command({'command': 'start', 'password': WRONG})
+        rec = only_record(monitor)
+        assert wait_terminal(monitor, rec.request.id).state == CommandState.ACKNOWLEDGED
+        time.sleep(0.1)
+        blob = repr(monitor.socketio.emit.call_args_list) + repr(monitor.logger.method_calls) \
+            + repr(monitor.mqtt_client.publish.call_args_list) + repr(rec.to_result_dict()) \
+            + repr(rec.result)
+        assert WRONG not in blob
+        assert SECRET not in blob
 
-    def test_bare_string_now_rejected_unauthenticated(self, monitor):
-        # Closes the previous bypass: the web UI/legacy clients can no
-        # longer get a bare, unauthenticated command string executed just
-        # because the dict/password path exists alongside it.
+    def test_bare_string_accepted(self, monitor):
         monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
         monitor._handle_socket_command('START')
-        assert not monitor.command_dispatcher._records
-        monitor.command_dispatcher._executor.assert_not_called()
-        assert monitor.logger.warning.called
-        assert 'unauthenticated' in repr(monitor.logger.warning.call_args_list)
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'START', 'ok': False,
-                                'error': 'unauthorized: password required'})
+        rec = only_record(monitor)
+        assert rec.request.name == 'start' and rec.request.source == 'socket'
+        assert wait_terminal(monitor, rec.request.id).state == CommandState.ACKNOWLEDGED
+
+    def test_envelope_request_id_and_ttl_honoured(self, monitor):
+        monitor.command_dispatcher._executor = Mock(return_value={'ok': True})
+        monitor._handle_socket_command({'command': 'start', 'request_id': 'rid-1', 'ttl': 30})
+        rec = only_record(monitor)
+        assert wait_terminal(monitor, rec.request.id).state == CommandState.ACKNOWLEDGED
+
+    def test_missing_server_password_disables_controls(self):
+        mon = build_monitor(password=None)
+        try:
+            mon._handle_socket_command({'command': 'start', 'password': WRONG})
+            rec = only_record(mon)
+            wait_terminal(mon, rec.request.id)
+            assert mon.mnet_client.login_standard.call_count == 0
+            assert WRONG not in repr(mon.socketio.emit.call_args_list) + repr(mon.logger.method_calls)
+            assert rec.state != CommandState.ACKNOWLEDGED
+        finally:
+            mon.command_dispatcher.stop(timeout=2)
 
     def test_legacy_socket_result_shapes(self, monitor):
         # MQTT keeps its unauthenticated plain-text legacy shape (tested
-        # separately below); the socket/web path now always requires the
-        # dict {"command", "password"} shape to reach the dispatcher.
+        # separately below); socket results keep their legacy shape too.
         monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
-        monitor._handle_socket_command({'command': 'start', 'password': SECRET})
+        monitor._handle_socket_command({'command': 'start'})
         wait_terminal(monitor, only_record(monitor).request.id)
         monitor.socketio.emit.assert_any_call('command_result',
                                               {'command': 'start', 'ok': True, 'reply': 'ab'})
-        monitor._handle_socket_command({'command': 'bogus', 'password': SECRET})
+        monitor._handle_socket_command({'command': 'bogus'})
         calls = [c for c in monitor.socketio.emit.call_args_list
                  if c.args[1].get('command') == 'bogus']
         assert len(calls) == 1  # exactly one rejection event, not duplicated
@@ -683,8 +687,7 @@ class TestMqttAndHttpLegacy:
         monitor.command_dispatcher._executor = Mock(return_value={'command': 'start', 'ok': True,
                                                                    'reply': 'ab'})
         monitor.app.config['TESTING'] = True
-        resp = monitor.app.test_client().post('/api/command/start',
-                                              headers={'X-Control-Password': SECRET})
+        resp = monitor.app.test_client().post('/api/command/start')
         body = resp.get_json()
         assert resp.status_code == 200
         assert {'command', 'ok', 'reply', 'state', 'id'} <= set(body)
@@ -695,11 +698,12 @@ class TestMqttAndHttpLegacy:
         client = monitor.app.test_client()
         monitor.app.config['TESTING'] = True
         responses = [
-            client.post('/api/command/start', headers={'X-Control-Password': SECRET}),
+            client.post('/api/command/start'),
             client.post('/api/command/start', headers={'X-Control-Password': WRONG}),
-            client.post('/api/command/bogus', headers={'X-Control-Password': SECRET}),
+            client.post('/api/command/start', json={'password': WRONG}),
+            client.post('/api/command/bogus', headers={'X-Control-Password': WRONG}),
         ]
-        monitor._handle_socket_command({'command': 'stop', 'password': SECRET})
+        monitor._handle_socket_command({'command': 'stop'})
         monitor._handle_socket_command({'command': 'stop', 'password': WRONG})
         monitor._handle_command_message(None, None, self.Msg(b'start', retain=True))
         time.sleep(0.2)
@@ -737,43 +741,22 @@ class TestSocketRealTransportTargeting:
     def _received(self, client):
         return [m for m in client.get_received() if m['name'] == 'command_result']
 
-    def test_unauthorized_reply_not_broadcast_to_bystander(self, real_monitor):
+    def test_invalid_payload_reply_not_broadcast_to_bystander(self, real_monitor):
         bystander = real_monitor.socketio.test_client(real_monitor.app)
         actor = real_monitor.socketio.test_client(real_monitor.app)
         try:
             bystander.get_received()  # drain connect-time emits
             actor.get_received()
 
-            actor.emit('command', {'command': 'start', 'password': WRONG})
-
-            actor_results = self._received(actor)
-            bystander_results = self._received(bystander)
-
-            assert len(actor_results) == 1
-            assert actor_results[0]['args'][0] == {
-                'command': 'start', 'ok': False, 'error': 'unauthorized'}
-            # The rejection must reach only the requester, never the
-            # bystander connection.
-            assert bystander_results == []
-            assert not real_monitor.command_dispatcher._records
-        finally:
-            actor.disconnect()
-            bystander.disconnect()
-
-    def test_bare_string_reply_not_broadcast_to_bystander(self, real_monitor):
-        bystander = real_monitor.socketio.test_client(real_monitor.app)
-        actor = real_monitor.socketio.test_client(real_monitor.app)
-        try:
-            bystander.get_received()
-            actor.get_received()
-
-            actor.emit('command', 'start')  # legacy bare-string, no password
+            actor.emit('command', 12345)
 
             actor_results = self._received(actor)
             bystander_results = self._received(bystander)
 
             assert len(actor_results) == 1
             assert actor_results[0]['args'][0]['ok'] is False
+            # The rejection must reach only the requester, never the
+            # bystander connection.
             assert bystander_results == []
             assert not real_monitor.command_dispatcher._records
             real_monitor._dispatcher_execute.assert_not_called()
@@ -781,11 +764,25 @@ class TestSocketRealTransportTargeting:
             actor.disconnect()
             bystander.disconnect()
 
-    def test_authenticated_command_still_executes_over_real_transport(self, real_monitor):
+    def test_bare_string_executes_over_real_transport(self, real_monitor):
         actor = real_monitor.socketio.test_client(real_monitor.app)
         try:
             actor.get_received()
-            actor.emit('command', {'command': 'start', 'password': SECRET})
+            actor.emit('command', 'start')
+            deadline = time.time() + 2.0
+            results = []
+            while time.time() < deadline and not results:
+                time.sleep(0.02)
+                results = self._received(actor)
+            assert results and results[0]['args'][0]['ok'] is True
+        finally:
+            actor.disconnect()
+
+    def test_command_executes_over_real_transport_ignoring_caller_password(self, real_monitor):
+        actor = real_monitor.socketio.test_client(real_monitor.app)
+        try:
+            actor.get_received()
+            actor.emit('command', {'command': 'start', 'password': WRONG})
             deadline = time.time() + 2.0
             results = []
             while time.time() < deadline and not results:
