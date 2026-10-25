@@ -731,10 +731,33 @@ export class GaiaWind133Scene {
         // "upright" term needed.
         float bendAmount = windIntensity * (0.7 + 0.95 * gust) * bendWeight;
         float microSway = windIntensity * 0.08 * sin(time * 4.2 + phase) * bendWeight;
-        vec3 localPos = position;
-        localPos.x += (windDir.x * bendAmount + microSway);
-        localPos.z += (windDir.y * bendAmount + microSway);
-        vec4 worldPos = world * vec4(localPos, 1.0);
+        // ROOT CAUSE FIX (per direct review of desktop1280 stills): the
+        // wind-bend offset was previously added to localPos BEFORE the
+        // world matrix multiply, so it was carried through the per-
+        // instance yaw rotation along with the blade's own geometry.
+        // Each blade has a random yaw (aParams-independent, baked into
+        // the instance world matrix for facing variety -- intentional
+        // and fine on its own), so that rotation silently redirected
+        // the "wind" lean to a different world-space direction for
+        // every single blade. The result was NOT a coherent lean at
+        // all -- it was hundreds of blades each leaning in their own
+        // random direction, which reads exactly like chopped straw
+        // strewn at random angles, not standing wheat bending downwind.
+        //
+        // Fix: transform the blade's own geometry (root + tip shape) by
+        // the world matrix FIRST, with no bend applied -- this keeps
+        // each blade upright/rooted exactly as placed, including its
+        // yaw-varied facing. The wind bend is then added as a SEPARATE
+        // offset in true world-space X/Z, after the per-instance
+        // rotation has already been applied, so every blade leans in
+        // the same real wind direction regardless of its random facing.
+        vec4 worldBase = world * vec4(position, 1.0);
+        vec3 worldBend = vec3(
+          windDir.x * bendAmount + microSway,
+          0.0,
+          windDir.y * bendAmount + microSway
+        );
+        vec4 worldPos = vec4(worldBase.xyz + worldBend, 1.0);
         gl_Position = projection * view * worldPos;
         vUv = uv;
       }

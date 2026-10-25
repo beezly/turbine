@@ -531,3 +531,87 @@ still drives only amplitude/frequency; calm settles exactly still;
 stale/disconnected/invalid telemetry freezes; reduced-motion stays
 static; rotor motion remains strictly `rotor_rpm`-driven; the k^-2
 7-mode forcing model, 30deg NW->SE cone, and omega0 are untouched.
+
+## Standing-wheat orientation fix + framing correction (2026-10-25, ~21:40 UTC)
+
+Direct parent review of `wheatfield_fix2_20261025_2120` (commit d430225)
+accepted the gold-on-gold tonal match, extended coverage, 2-tri quad
+width, raised instance count, and prop deletion as real improvements to
+protect/not regress. It flagged one remaining defect and one evidence
+problem.
+
+### Root cause found and fixed: wind-lean direction was coupled to each blade's random yaw
+On desktop 1280 at high wind the blades read as chopped straw at random
+angles rather than a standing, coherently-bending crop. The per-instance
+world matrix composition (`BABYLON.Matrix.ComposeToRef`) already applied
+only a Y-axis (yaw) rotation per blade -- confirmed no pitch/roll jitter
+exists anywhere in the placement code, so that was never the cause.
+
+The actual bug was in the grass vertex shader: the wind-bend offset was
+added to `localPos` *before* the per-instance world matrix multiply:
+```
+localPos.x += windDir.x * bendAmount + microSway;
+vec4 worldPos = world * vec4(localPos, 1.0);
+```
+Since `world` includes each blade's own random yaw rotation, that
+offset was carried through the SAME rotation as the blade's geometry --
+so the "wind" direction was silently re-rotated to a different world
+direction for every single blade, proportional to its own random
+facing. The result was not a coherent lean at all: it was thousands of
+blades each leaning toward their own random direction, which is exactly
+"chopped straw strewn at random angles."
+
+Verified analytically before and after the fix (not just by eye, since
+software-rasterized thin triangles are hard to judge visually at full
+density): for two blades with yaw 10 deg and 140 deg, the OLD formula
+produced lean vectors (0.983, 0.688) and (-0.105, -1.195) -- pointing in
+very different, almost opposite, directions. The NEW formula produces
+the IDENTICAL lean vector (0.849, 0.849) for both yaws -- every blade
+now leans in the true world wind direction regardless of its facing.
+
+Fix: transform the blade's own geometry by the world matrix FIRST (with
+no bend applied), then add the wind-bend offset as a separate, true
+world-space X/Z vector afterward:
+```
+vec4 worldBase = world * vec4(position, 1.0);
+vec3 worldBend = vec3(windDir.x * bendAmount + microSway, 0.0, windDir.y * bendAmount + microSway);
+vec4 worldPos = vec4(worldBase.xyz + worldBend, 1.0);
+```
+Root vertices still have `bendWeight = position.y^2 = 0`, so roots
+remain exactly anchored at ground level; only the tip deflects. This
+was already correct and did not need to change. The k^-2 7-mode
+forcing, the 30deg NW->SE cone, and omega0 were NOT touched, per
+instruction -- only the direction-coupling bug in how that forcing's
+output was applied to each blade's geometry.
+
+### Evidence framing corrected
+The first attempt's `desktop1280_calm.png` was scrolled to the top of
+the page (header/control row/wind card in frame, canvas barely a
+sliver) and was not comparable to the windy shot. All captures in this
+round scroll the canvas's own bounding-rect top to a fixed 20px offset
+before capture, so every scenario (calm, windy, gust sequence, both
+mobile widths) has the full canvas in frame at a consistent position.
+
+### Correction to a prior overstatement
+A previous report in this session claimed the round-2 wheatfield_fix2
+captures showed "a genuinely continuous canopy reaching the horizon
+with no bare ground." That is not accurate and is corrected here: in
+the windy desktop frame from that round there was still visible bare
+gold ground between stalks across the mid-field, and the horizon band
+read as bare ground rather than crop. It was less jarring than the
+first attempt because the tones now match, but "no bare ground" should
+not have been recorded as fact.
+
+### Final figures (unchanged from the previous round, re-confirmed)
+- Coverage: `FIELD_RADIUS=55m`, `DENSITY_DECAY=30m`, `DENSITY_FLOOR=0.35`.
+- Instance count: desktop 48,000 / narrow(mobile) 22,000.
+- Blade geometry: 4 verts / 2 tris, width 1.6-2.5x base.
+- Only the vertex-shader bend-application order changed in this round;
+  density, geometry, and palette are untouched from the prior commit.
+- Tests re-run clean: 19/19 JS, 275 passed/33 skipped Python.
+- Evidence: `.qa-artifacts/standingwheat_20261025_2143/` -- calm/windy
+  pair at identical camera AND identical framing, a 4-frame gust
+  sequence, and mobile 390/320, all stat/md5'd.
+
+Honesty gating, wave-forcing parameters, DPR/FPS caps, hidden-tab
+suspension, and reduced-motion handling unchanged throughout.
