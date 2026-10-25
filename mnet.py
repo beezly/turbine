@@ -208,12 +208,18 @@ class Mnet:
     # quirk: this firmware acknowledges a successful hidden login with the
     # generic 0x0001 ack instead of echoing 0x13A1.
     #
-    # This is intentionally NOT extended to REQ_LOGIN_STANDARD (0x138E,
-    # control/write login): no hardware evidence exists for that request
-    # type's reply behaviour (control commands were never exercised against
-    # this controller during the deploy attempt), so it still requires an
-    # exact echo or the documented 0x1390 rejection -- do not infer the same
-    # quirk applies there without separately observed evidence.
+    # Update: a live RESET attempt against this same controller at
+    # 2026-10-25 22:22:10 UTC showed REQ_LOGIN_STANDARD (0x138E,
+    # control/write login) *also* gets a 0x0001 reply -- the controller-wide
+    # generic-ack quirk is not limited to hidden login. This is separately
+    # observed evidence for the standard login specifically (not an
+    # inference carried over from the hidden-login case): a bounded,
+    # redacted journalctl excerpt from that exact timestamp showed a
+    # correctly-addressed 0x0001 reply to a login_standard() call, never
+    # the documented 0x1390 rejection. REQ_LOGIN_STANDARD now accepts
+    # 0x0001 for the same evidence-based reason REQ_LOGIN already does --
+    # this is NOT a blanket widening of accepted packet types; it is
+    # scoped to this one request type, backed by this one observation.
     REPLY_ACK = b'\x00\x01'
 
     # Request packet type -> set of documented valid reply packet types.
@@ -226,14 +232,37 @@ class Mnet:
     # type (0x138E or 0x13A1); a rejected login instead returns the shared
     # "Remote not logged in" code 0x1390.
     #
-    # Request types with NO documented reply code in docs/MNET.md (currently
-    # only REQ_COMMAND / 0x0C32, whose only caller logs whatever reply type
-    # comes back without asserting one) are intentionally left out of this
+    # Request types with NO documented reply code in docs/MNET.md and no
+    # hardware-observed quirk evidence are intentionally left out of this
     # map; send_packet falls back to requiring an exact echo for those so an
     # unexpected reply type still raises instead of being silently invented.
     # 0x0BEA (Acknowledge alarm) is included below even though no current
     # caller in this file sends that request type, for completeness against
     # docs/MNET.md and so a future caller gets correct validation for free.
+    #
+    # REQ_COMMAND / 0x0C32 has NO documented reply code in docs/MNET.md at
+    # all (it does not appear in the "Packet Type Codes" table, unlike every
+    # other request type above). Prior to the identity/type-validation
+    # hardening added in this repo's history (see a436d77, 2109a53, 124376f,
+    # 782c22e), send_packet performed no reply validation whatsoever and the
+    # command dispatcher (then turbine_monitor.py's _execute_pending_command)
+    # treated ANY syntactically valid reply to a command as a successful
+    # ack -- this was the actual, long-running production behaviour this
+    # controller was built against, not an assumption drawn from
+    # docs/MNET.md (which does not document a reply code for this request
+    # type at all). That hardening's exact-echo fallback (no entry here for
+    # REQ_COMMAND) was therefore a real regression once source/destination/
+    # CRC checks were added: two separate live RESET attempts against this
+    # same controller on 2026-10-25 (22:39:26 and 22:41:32 UTC, each a
+    # bounded, redacted journalctl excerpt) show a correctly-addressed,
+    # CRC-valid 0x0001 "Reply Acknowledge" in response to REQ_COMMAND, never
+    # the literal 0x0C32 echo. This mirrors the identical, already-fixed
+    # quirk for both logins above. The fix stays narrow: only REPLY_ACK
+    # (0x0001) is added back for REQ_COMMAND specifically, backed by this
+    # session's own repeated observation -- not a reversion to accepting
+    # any reply type, and the CRC/source/destination checks added by that
+    # same hardening are kept exactly as they are, independently valuable
+    # regardless of which reply type they are checking.
     REQUEST_RESPONSE_TYPES: Dict[bytes, frozenset] = {
         REQ_DATA: frozenset({b'\x0c\x29'}),             # Request data -> Reply data
         REQ_MULTIPLE_DATA: frozenset({b'\x0c\x2b'}),     # Request multiple data -> Reply multiple data
@@ -242,11 +271,18 @@ class Mnet:
         b'\x0c\x04': frozenset({b'\x0c\x06'}),          # Display command type 2 -> 0xc06
         b'\x0c\x05': frozenset({b'\x0c\x07'}),          # Display command type 3 -> 0xc07
         b'\x0b\xea': frozenset({b'\x00\x01'}),          # Acknowledge alarm -> Reply Acknowledge (no current caller uses this request type)
+        # Remote command: no documented reply code in docs/MNET.md at all,
+        # PLUS the hardware-observed 0x0001 generic-ack quirk (see REQ_COMMAND
+        # comment above for the 2026-10-25 22:39/22:41 UTC evidence and the
+        # pre-hardening history this restores).
+        REQ_COMMAND: frozenset({REQ_COMMAND, REPLY_ACK}),
         # Hidden login: echo (0x13A1) or 0x1390 rejection per docs/MNET.md,
         # PLUS the hardware-observed 0x0001 generic-ack quirk above.
         REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN, REPLY_ACK}),
-        # Standard (control) login: no 0x0001 evidence -- keep strict.
-        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN}),  # standard login: echo on success, 0x1390 on rejection
+        # Standard (control) login: echo on success, 0x1390 on rejection,
+        # PLUS the hardware-observed 0x0001 generic-ack quirk (see REPLY_ACK
+        # comment above for the 2026-10-25 22:22 UTC evidence).
+        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN, REPLY_ACK}),
     }
 
     # Login constants
