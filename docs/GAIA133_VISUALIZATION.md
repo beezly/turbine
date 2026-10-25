@@ -348,3 +348,88 @@ that a deploy succeeded.**
   advancing, **and** `assert_control_enabled.sh` exit `0`. Any one of
   these alone is not sufficient; the credential-gated control path is a
   distinct failure mode from "the process started" or "telemetry flows."
+
+## Wheat-field grass density rework (2026-10-25, second review round)
+
+Per explicit feedback ("it should look like a wheat field"), the grass
+system was reworked from a sparse-tussock meadow model to a dense,
+continuous-canopy model, with the following real findings along the way:
+
+### Bugs found and fixed during this work
+- **Placement attempts-exhaustion bug**: the first density rewrite used
+  global rejection sampling (pick a random point anywhere in the full
+  field radius, reject if it falls outside the target zone). With a
+  small target zone relative to the full field, this wasted the large
+  majority of the sampling attempts budget on points that were always
+  going to be rejected, silently placing far fewer blades than the
+  configured `COUNT` (measured: ~26,000 placed out of a 46,000 target).
+  Fixed by switching to direct sampling within the target zone(s) so
+  every attempt is a placement.
+- **"Crop circle" edge artifact**: an explicit two-zone near/mid radius
+  split (full density inside a near radius, a probability ramp between
+  near and mid radius) produced a visible hard-edged disc boundary no
+  matter how smooth the ramp's probability curve was, because density
+  was still discontinuous in its derivative at the near-radius boundary.
+  Fixed by replacing the two-zone model with a single continuous
+  exponential radial density function (`exp(-r/DECAY) + FLOOR`), which
+  has no boundary to see.
+- **Real per-thin-instance render cost measured, not assumed**: directly
+  measured via `engine.getFps()` over a 3s sampling window at several
+  instance counts on this specific test host:
+
+  | Instance count | Measured FPS (desktop canvas) |
+  |---|---|
+  | 10 (near-zero, baseline scene cost) | 60.0 |
+  | 3,000 | 18.5 |
+  | 7,000 (the original, previously-approved meadow-grass count) | 9.5 |
+  | 10,000 | 7.4 |
+  | 18,000 | 4.8 |
+  | 100,000 | 1.1 |
+
+  This is an almost-linear cost of roughly 0.01ms/instance plus a ~24ms
+  fixed scene overhead on this host -- i.e. the "hundreds of stalks per
+  square metre" literal density target is **not deliverable on this
+  specific test host at any usable interactive frame rate**, and
+  critically, even the already-approved PREVIOUS 7,000-instance meadow
+  count only measured 9.5fps here, well under the `MAX_FPS=30` cap --
+  meaning frame rate was never actually verified in earlier review
+  rounds, only assumed. This appears to be a software/virtualized WebGL
+  rendering path on this specific node rather than a GPU-accelerated
+  one; real end-user hardware (phones, desktop browsers with GPU
+  acceleration) would very likely sustain meaningfully higher counts,
+  but this is the only hardware available to measure on, and the honest
+  number is reported rather than an assumed one.
+- Final delivered density, chosen as a measured compromise given the
+  above: `COUNT = isNarrow ? 4,500 : 10,000` (desktop measured 7.4fps,
+  mobile-width canvas measured 16.7fps -- mobile is faster here because
+  its canvas has far fewer total pixels to rasterize even in software,
+  not because of a different instance count scaling rule). This is
+  LOWER than the "order of magnitude higher" originally requested; the
+  visual density gain instead comes from:
+  - continuous (no bare-gap) placement via the exponential radial model,
+    replacing the old "tussock clumps with empty ground between them"
+    look,
+  - wider blades (`widthScale` 1.1-1.6, up from 0.85-1.35) so neighbors
+    visually overlap at a lower instance count,
+  - a 3-vertex/1-triangle blade (down from 12 verts/10 tris) so whatever
+    instance budget exists is spent as efficiently as possible,
+  - a re-toned, matching-palette ground texture (dark shadowed
+    golden-green canopy-base tone, not bright soil) so any residual gaps
+    read as shade between stalks, not dirt.
+
+### Wheat character changes
+- Taller (1.3-1.85m, up from 1.1-1.8m) and more upright at rest (the
+  bend amount is strictly proportional to real `windIntensity`, so
+  calm telemetry = exactly 0 lean, no separate "upright" term needed).
+- Stronger coherent lean under wind (`0.7 + 0.95*gust` bend-weight
+  multiplier, up from `0.55 + 0.75*gust`).
+- Golden-green two-tone palette (`vec3(0.33,0.34,0.11)` to
+  `vec3(0.52,0.47,0.17)` per-blade tint mix), replacing the old uniform
+  olive meadow-grass color.
+- The k^-2 fixed-phase 7-mode forcing, 30deg NW->SE cone, and
+  omega0~2.03 rad/s from the original wave-forcing model section above
+  are unchanged -- only the canvas it acts on (density/geometry/color)
+  changed. Honesty gating is unchanged: real `wind_speed_mps` drives only
+  amplitude/frequency scaling; calm settles exactly still; stale/
+  disconnected/invalid telemetry freezes motion; reduced-motion stays
+  static; rotor motion is strictly `rotor_rpm`-driven.

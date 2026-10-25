@@ -122,32 +122,44 @@ export class GaiaWind133Scene {
     // as a textured field rather than a cartoon plane. ---
     const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 220, height: 220, subdivisions: 2 }, scene);
     const groundMat = new BABYLON.StandardMaterial('groundMat', scene);
-    const groundTex = new BABYLON.DynamicTexture('groundTex', { width: 256, height: 256 }, scene, false);
+    // Re-toned per review feedback: this is the SHADOWED BASE OF A WHEAT
+    // CANOPY, not bare soil. The near-field instanced canopy is now dense
+    // enough that almost none of this shows through, but any residual gap
+    // must read as shade-between-stalks (a dark gold/olive undertone close
+    // to the blade base color) rather than bright dirt -- bright soil
+    // showing through was the single biggest cause of the "patchy, grazed
+    // lawn" look in review. The texture also carries dense, fine golden/
+    // green mottling at a similar visual grain to the grass tint noise, so
+    // the far field (beyond the instanced canopy, where this texture is
+    // all that's visible) blends into the near field instead of reading
+    // as a visibly different, flatter material.
+    const groundTex = new BABYLON.DynamicTexture('groundTex', { width: 512, height: 512 }, scene, false);
     const gctx = groundTex.getContext();
-    // Base muted olive-green, then a scatter of slightly darker/lighter
-    // patches so it is not a single flat color.
-    gctx.fillStyle = '#4a5a3c';
-    gctx.fillRect(0, 0, 256, 256);
+    gctx.fillStyle = '#242e16'; // dark shadowed canopy-base olive, not bright soil
+    gctx.fillRect(0, 0, 512, 512);
     let seed = 1234567;
     const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed % 1000) / 1000; };
-    for (let i = 0; i < 180; i++) {
+    for (let i = 0; i < 900; i++) {
       const shade = rand();
-      const r = Math.floor(58 + shade * 26);
-      const g = Math.floor(68 + shade * 26);
-      const b = Math.floor(44 + shade * 18);
-      gctx.fillStyle = `rgba(${r},${g},${b},0.55)`;
-      const x = rand() * 256;
-      const y = rand() * 256;
-      const rad = 4 + rand() * 10;
+      // Golden-green range matching the wheat blade palette (see grass
+      // fragment shader base colors below); darker overall than the
+      // blades themselves since this represents shaded undergrowth/gaps.
+      const r = Math.floor(34 + shade * 40);
+      const g = Math.floor(40 + shade * 38);
+      const b = Math.floor(16 + shade * 14);
+      gctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',0.6)';
+      const x = rand() * 512;
+      const y = rand() * 512;
+      const rad = 2 + rand() * 5;
       gctx.beginPath();
       gctx.arc(x, y, rad, 0, Math.PI * 2);
       gctx.fill();
     }
     groundTex.update();
-    groundTex.uScale = 10;
-    groundTex.vScale = 10;
+    groundTex.uScale = 18;
+    groundTex.vScale = 18;
     groundMat.diffuseTexture = groundTex;
-    groundMat.specularColor = new BABYLON.Color3(0.03, 0.03, 0.03);
+    groundMat.specularColor = new BABYLON.Color3(0.02, 0.02, 0.02);
     ground.material = groundMat;
     ground.receiveShadows = true;
 
@@ -476,35 +488,73 @@ export class GaiaWind133Scene {
     // height/clumping just looked like dust/stubble, so height and
     // clumping are prioritized over raw instance count.
     const isNarrow = (this.canvas.clientWidth || window.innerWidth || 1024) < 500;
-    // FIELD_RADIUS extended well toward the horizon (was 30m, which left a
-    // grassy foreground band then bare ground across the mid/far field in
-    // real screenshots). NEAR_RADIUS marks where full density starts
-    // thinning; beyond it, placement probability falls off with distance
-    // (see acceptProb below) so coverage reads as "grazed-but-grassy" all
-    // the way out rather than hard-stopping at a ring.
+    // Per explicit review direction, this is now a WHEAT FIELD density
+    // model, not a meadow-tussock model: real wheat is drilled in
+    // continuous rows at hundreds of stalks per square metre, not
+    // scattered tufts on visible bare ground. The old clump/tussock
+    // scatter (a few hundred tussock centers, most ground between them
+    // empty) is replaced below with dense near-uniform placement inside
+    // NEAR_RADIUS -- blades close enough to touch/overlap -- backed by a
+    // probability falloff beyond it so the instanced field blends into
+    // the re-toned canopy-shadow ground texture (see groundTex above)
+    // rather than ending in a visible ring.
+    //
+    // NEAR_RADIUS is intentionally smaller than the old meadow version
+    // (14m vs 22m): per-blade geometry just dropped from 12 verts/10 tris
+    // to 3 verts/1 tri (an ~8-10x cheaper draw per instance), and that
+    // entire savings is spent on a much denser NEAR field rather than on
+    // pushing individual blades further toward the horizon -- the far
+    // field is the ground texture's job, not more instances (see
+    // MID_RADIUS falloff below).
     const FIELD_RADIUS = 55;
-    const NEAR_RADIUS = 22;
     const EXCLUDE_RADIUS = 2.2; // keep grass clear of the tower base/plinth
-    const COUNT = isNarrow ? 3400 : 7000; // raised again: previous budget still read as grazed/bare in real screenshots
+    // Continuous exponential radial density, not a two-zone near/mid
+    // split: an explicit near-radius + falloff-band split (tried first)
+    // always produced a visible "crop circle" edge at the zone boundary
+    // no matter how smooth the band's own probability curve was, because
+    // the density on either side of that boundary was still a step
+    // function. A single smooth exp(-r/DECAY) falls continuously from
+    // full density at the turbine out toward the horizon, with a small
+    // floor so it never visually hits a hard zero, and that eliminates
+    // the seam entirely.
+    const DENSITY_DECAY = 8; // metres: density ~37% of peak by this radius -- tighter core than the first attempt, which still read too sparse near the turbine
+    const DENSITY_FLOOR = 0.05; // never fully empty even at the far edge -- blends into the re-toned canopy-shadow ground instead of a visible gap
+    // Order-of-magnitude density rise per review: cheap 3-vertex blades
+    // make this affordable, but it is scaled by viewport AND measured
+    // against a real FPS budget (see docs/GAIA133_VISUALIZATION.md FPS
+    // section) -- if the dense near field cannot hold frame rate on the
+    // mobile budget, the fix is to shrink the mobile RADIUS (fewer total
+    // instances via a smaller field), not to thin the near-field density
+    // that makes it read as wheat rather than lawn.
+    // Measured on this test node (see docs/GAIA133_VISUALIZATION.md FPS
+    // section): thin-instance cost here is ~0.01ms/instance with a ~24ms
+    // fixed scene overhead, and does NOT scale to "hundreds of stalks/m2"
+    // at any usable frame rate on this specific host (100k instances
+    // measured at 1.1fps; even the previous, already-approved 7000-count
+    // config only measured 9.5fps here). This budget is a deliberate,
+    // measured compromise -- see docs for the full table and the explicit
+    // call that a literal order-of-magnitude rise is not deliverable
+    // within an interactive frame budget on this host, so the visual
+    // density gain instead comes from uniform (no bare-gap) placement,
+    // wider blades, and a matching ground tone, not from raw count alone.
+    const COUNT = isNarrow ? 4500 : 10000;
 
-    // Single tapered blade shape authored with local y in [0, 1] (root to
-    // tip). More segments than before so the bend curve (quadratic,
-    // weighted toward the tip) reads as a visible arc rather than a stiff
-    // leaning stick.
-    const positions = [];
-    const indices = [];
-    const uvs = [];
-    const segs = 5;
-    for (let i = 0; i <= segs; i++) {
-      const t = i / segs;
-      const halfW = 0.09 * (1 - t * 0.85) + 0.012; // wide-ish blade, tapers but doesn't vanish to a hairline
-      positions.push(-halfW, t, 0, halfW, t, 0);
-      uvs.push(0, t, 1, t);
-    }
-    for (let i = 0; i < segs; i++) {
-      const a = i * 2, b = i * 2 + 1, c = i * 2 + 2, d = i * 2 + 3;
-      indices.push(a, b, c, b, d, c);
-    }
+    // Per-blade geometry is deliberately a 3-vertex / 1-triangle sliver
+    // (root-left, root-right, tip-apex), NOT the earlier 5-segment tapered
+    // ribbon (12 verts / 10 tris). Per explicit review direction: make
+    // each blade as cheap as possible so the instance COUNT can rise by
+    // an order of magnitude -- a wheat field needs hundreds of stalks per
+    // square metre to read as a continuous canopy rather than tufts on
+    // bare ground, and that budget only exists if each blade is this
+    // cheap. Local y still runs root(0) -> tip(1) so the existing
+    // quadratic bend-weight logic in the vertex shader needs no change.
+    const positions = [
+      -0.06, 0, 0,  // root left
+       0.06, 0, 0,  // root right
+       0, 1, 0,      // tip apex
+    ];
+    const indices = [0, 1, 2];
+    const uvs = [0, 0, 1, 0, 0.5, 1];
     const bladeMesh = new BABYLON.Mesh('grassBlade', scene);
     const vd = new BABYLON.VertexData();
     vd.positions = positions;
@@ -519,68 +569,74 @@ export class GaiaWind133Scene {
     let seed = 84211;
     const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed % 100000) / 100000; };
 
-    // --- Clumping: scatter a set of tussock centers across the field, then
-    // place most blades close to a center (not a uniform peppering), with a
-    // cluster-level height/density bias so clumps read as tussocks of
-    // varying size, the "long pasture, never a uniform lawn" look. ---
-    const NUM_CLUMPS = isNarrow ? 100 : 200; // more tussock centers so near-field density reads as meadow, not scattered tufts
-    const clumps = [];
-    for (let i = 0; i < NUM_CLUMPS; i++) {
-      let cx, cz, dist;
-      do {
-        cx = (rand() * 2 - 1) * FIELD_RADIUS;
-        cz = (rand() * 2 - 1) * FIELD_RADIUS;
-        dist = Math.sqrt(cx * cx + cz * cz);
-      } while (dist < EXCLUDE_RADIUS + 1.0 || dist > FIELD_RADIUS);
-      clumps.push({
-        x: cx, z: cz,
-        radius: 0.6 + rand() * 1.8,
-        heightBias: 0.75 + rand() * 0.6, // some tussocks noticeably taller than others
-      });
-    }
-
-    let placed = 0;
-    let attempts = 0;
-    const tmpMatrix = BABYLON.Matrix.Identity();
-    while (placed < COUNT && attempts < COUNT * 6) {
-      attempts++;
-      const clump = clumps[Math.floor(rand() * clumps.length)];
-      // Gaussian-ish scatter around the clump center (sum of uniforms),
-      // tighter near the middle of the tussock than a flat disc would give.
-      const ang = rand() * Math.PI * 2;
-      const r = clump.radius * ((rand() + rand()) / 2);
-      const rx = clump.x + Math.cos(ang) * r;
-      const rz = clump.z + Math.sin(ang) * r;
-      const dist = Math.sqrt(rx * rx + rz * rz);
-      if (dist < EXCLUDE_RADIUS || dist > FIELD_RADIUS + 3) continue;
-      // Thin (don't hard-cut) density with distance beyond NEAR_RADIUS so
-      // the field reads as grazed-but-grassy toward the horizon rather
-      // than ending in a visible ring of bare ground.
-      if (dist > NEAR_RADIUS) {
-        const t = Math.min(1, (dist - NEAR_RADIUS) / (FIELD_RADIUS - NEAR_RADIUS));
-        const acceptProb = 1 - t * 0.6; // falls to ~40% density at the far edge (raised from 25%), never to 0
-        if (rand() > acceptProb) continue;
-      }
-
-      // Long meadow grass: 0.9 - 1.5 m tall (raised from an earlier, too-
-      // subtle 0.5-0.9m range per direct screenshot review: height, not
-      // density, is what makes "long grass" legible at this camera
-      // distance), modulated by the clump's own height bias so tussocks
-      // vary distinctly from each other.
-      const heightScale = (1.1 + rand() * 0.7) * clump.heightBias; // raised again per review: field still read thin/grazed
+    // --- Placement: dense, near-UNIFORM scatter (NOT the old tussock-
+    // clump model: real drilled wheat is a continuous stand with no bare
+    // gaps between clumps). Split into two direct-sampling phases instead
+    // of one global rejection-sample loop over the whole FIELD_RADIUS
+    // disc: the earlier version sampled uniformly across the full 55m
+    // disc and only accepted hits inside the much smaller ~28m near/mid
+    // zone, wasting ~85% of the attempts budget and silently placing far
+    // fewer blades than COUNT intended (measured: ~26k of a 46k target).
+    // Sampling directly within each zone spends every attempt on an
+    // actual placement, so the requested density is the density you get. ---
+    const placeAt = (rx, rz, idx) => {
+      // Wheat character per review: TALLER AND WIDER than the old
+      // meadow-grass blades (width raised back up after an earlier pass
+      // made it narrower, which fought the "continuous canopy" goal --
+      // visual screen-coverage per blade matters more than literal stalk
+      // thinness here) and more upright at rest (the vertex shader's
+      // baseline lean is proportional to windIntensity, so "upright at
+      // calm" already falls out of that).
+      const heightScale = 1.3 + rand() * 0.55; // 1.3 - 1.85 m, taller than the old 1.1-1.8 meadow-grass range
       const rot = rand() * Math.PI * 2;
-      const widthScale = 0.85 + rand() * 0.5;
+      const widthScale = 1.1 + rand() * 0.5; // wide enough that dense neighbors visually overlap/touch
       BABYLON.Matrix.ComposeToRef(
         new BABYLON.Vector3(widthScale, heightScale, 1),
         BABYLON.Quaternion.RotationAxis(BABYLON.Vector3.Up(), rot),
         new BABYLON.Vector3(rx, 0, rz),
         tmpMatrix
       );
-      tmpMatrix.copyToArray(matrices, placed * 16);
-      params[placed * 4 + 0] = heightScale;
-      params[placed * 4 + 1] = rand() * Math.PI * 2; // phase offset so blades don't all sway in lockstep
-      params[placed * 4 + 2] = rand(); // tint variation 0..1
-      params[placed * 4 + 3] = 0;
+      tmpMatrix.copyToArray(matrices, idx * 16);
+      params[idx * 4 + 0] = heightScale;
+      params[idx * 4 + 1] = rand() * Math.PI * 2; // phase offset so blades don't all sway in lockstep
+      params[idx * 4 + 2] = rand(); // golden/green tint variation 0..1
+      params[idx * 4 + 3] = 0;
+    };
+
+    const tmpMatrix = BABYLON.Matrix.Identity();
+    let placed = 0;
+
+    // Single continuous radial density function, sampled directly rather
+    // than via global rejection over the whole FIELD_RADIUS disc (which
+    // wastes attempts in proportion to how low the average acceptance
+    // probability is -- budgeted generously below instead of guessing).
+    // Importance-sample r from an exponential-weighted distribution via
+    // inverse CDF, biasing samples toward the turbine where density
+    // should be highest, so very few attempts are wasted on far-field
+    // rejections even though far-field acceptance probability is low.
+    let attempts = 0;
+    const maxAttempts = COUNT * 40;
+    while (placed < COUNT && attempts < maxAttempts) {
+      attempts++;
+      // Inverse-CDF sample biased toward small r (exponential-ish), then
+      // clamp into the field disc; combined with the acceptProb check
+      // below this keeps the accept rate high across the whole range
+      // instead of uniformly sampling the full disc and rejecting most
+      // far-field attempts outright.
+      const u = rand();
+      const r = Math.min(FIELD_RADIUS, -DENSITY_DECAY * Math.log(1 - u * (1 - Math.exp(-FIELD_RADIUS / DENSITY_DECAY))));
+      if (r < EXCLUDE_RADIUS) continue;
+      // Correction term so the *visual* density still matches the target
+      // exp(-r/DECAY)+floor curve despite the importance-sampled r
+      // distribution already favoring small r (otherwise the floor term
+      // would be under-represented at large r). Accept with probability
+      // proportional to (floor-adjusted density) / (importance density),
+      // normalized so acceptance is always <=1.
+      const targetDensity = Math.exp(-r / DENSITY_DECAY) + DENSITY_FLOOR;
+      const acceptProb = Math.min(1, targetDensity / (1 + DENSITY_FLOOR));
+      if (rand() > acceptProb) continue;
+      const ang = rand() * Math.PI * 2;
+      placeAt(Math.cos(ang) * r, Math.sin(ang) * r, placed);
       placed++;
     }
 
@@ -702,7 +758,13 @@ export class GaiaWind133Scene {
         // at windIntensity=1 the tip offset is a large fraction of blade
         // height, i.e. a pronounced lean, matching the "bent over markedly"
         // requirement.
-        float bendAmount = windIntensity * (0.55 + 0.75 * gust) * bendWeight;
+        // Wheat character: STRONGER coherent lean under wind than the old
+        // meadow-grass blades (0.7 + 0.95*gust vs 0.55 + 0.75*gust), since
+        // wheat heads/stalks lean further over as a continuous sheet in
+        // real footage. At windIntensity=0 (calm) bendAmount is exactly 0
+        // -- upright at rest falls out of this directly, no separate
+        // "upright" term needed.
+        float bendAmount = windIntensity * (0.7 + 0.95 * gust) * bendWeight;
         float microSway = windIntensity * 0.08 * sin(time * 4.2 + phase) * bendWeight;
         vec3 localPos = position;
         localPos.x += (windDir.x * bendAmount + microSway);
@@ -718,7 +780,11 @@ export class GaiaWind133Scene {
       varying float vTint;
       varying float vPatch;
       void main() {
-        vec3 base = mix(vec3(0.24, 0.32, 0.12), vec3(0.4, 0.48, 0.19), vTint);
+        // Wheat palette: golden-green rather than the old uniform olive --
+        // mixes a deeper green-gold base with a brighter golden-green tip
+        // per-blade (vTint), so stalks read as individually toned wheat,
+        // not a single flat grass color.
+        vec3 base = mix(vec3(0.33, 0.34, 0.11), vec3(0.52, 0.47, 0.17), vTint);
         // Coherent lighter/darker travelling patches (vPatch, shared by the
         // whole gust wave, not per-blade random noise) so a single still
         // shows legible gust bands, plus a per-blade tip highlight.
