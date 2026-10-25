@@ -30,6 +30,19 @@ class FakeDevice:
         self.written.append(data)
 
 
+class ChunkedDevice(FakeDevice):
+    """Returns at most `chunk` bytes per read call, like a slow TCP/serial link."""
+
+    def __init__(self, data: bytes = b'', chunk: int = 1):
+        super().__init__(data)
+        self.chunk = chunk
+        self.read_calls = 0
+
+    def read(self, n: int) -> bytes:
+        self.read_calls += 1
+        return super().read(min(n, self.chunk))
+
+
 def make_frame(data: bytes = b'\x9c\x43', packet_type: bytes = b'\x0c\x28') -> bytes:
     """A valid wire frame (no 0xFF bytes in data, so escaping is a no-op)."""
     return bytes(MnetPacket(b'\x02', b'\x01', packet_type, len(data), data))
@@ -94,6 +107,39 @@ class TestReadPacketValidation:
     def test_empty_payload_frame_is_valid(self):
         m = Mnet(FakeDevice(make_frame(b'')))
         assert m.read_packet().data == b''
+
+
+class TestReadPacketPartialReads:
+    @pytest.mark.parametrize('chunk', [1, 2, 3])
+    def test_reassembles_frame_from_small_chunks(self, chunk):
+        frame = make_frame(b'\x9c\x43\x00\x01\x02')
+        device = ChunkedDevice(frame, chunk=chunk)
+        packet = Mnet(device).read_packet()
+        assert packet.data == b'\x9c\x43\x00\x01\x02'
+        assert device.read_calls > 3  # needed more than one read per section
+        assert not device.buffer
+
+    def test_empty_payload_from_small_chunks(self):
+        assert Mnet(ChunkedDevice(make_frame(b''), chunk=1)).read_packet().data == b''
+
+    def test_eof_mid_header_raises_instead_of_looping(self):
+        device = ChunkedDevice(make_frame()[:3], chunk=1)
+        with pytest.raises(mnet.MnetFrameError, match='short header read: 3 of 6'):
+            Mnet(device).read_packet()
+        assert device.read_calls == 4  # three bytes, then the empty read
+
+    def test_eof_mid_data_raises(self):
+        frame = make_frame(b'\x9c\x43\x00\x01')
+        with pytest.raises(mnet.MnetFrameError, match='short data read: 2 of 4'):
+            Mnet(ChunkedDevice(frame[:8], chunk=2)).read_packet()
+
+    def test_eof_mid_tail_raises(self):
+        with pytest.raises(mnet.MnetFrameError, match='short tail read: 1 of 3'):
+            Mnet(ChunkedDevice(make_frame()[:-2], chunk=1)).read_packet()
+
+    def test_device_returning_empty_immediately_raises(self):
+        with pytest.raises(mnet.MnetFrameError, match='connection closed'):
+            Mnet(FakeDevice(b'')).read_packet()
 
 
 # --------------------------------------------- Bug #2: multi-data validation
@@ -195,6 +241,62 @@ class TestRunRecovery:
         assert monitor.status['connected'] is False
 
 
+class TestNotLoggedInRecovery:
+    def _prep(self, monitor, collect_side_effect):
+        monitor._login_to_turbine = Mock()
+        monitor._execute_pending_command = Mock()
+        monitor._sync_controller_time = Mock()
+        monitor._reconnect_device = Mock()
+        monitor._collect_turbine_data = Mock(side_effect=collect_side_effect)
+
+    def test_not_logged_in_triggers_relogin(self, monitor):
+        import turbine_monitor as tm
+        self._prep(monitor, [tm.NotLoggedInError("Cannot collect data: not logged in to controller"),
+                             StopLoop()])
+        with patch('turbine_monitor.threading.Thread'), pytest.raises(StopLoop):
+            monitor.run()
+        # mocked login never sets logged_in, so: loop-top login, the NotLoggedInError
+        # recovery login, then the loop-top login of the next iteration
+        assert monitor._login_to_turbine.call_count == 3
+        monitor._reconnect_device.assert_not_called()
+
+    def test_relogin_connection_failure_falls_through_to_reconnect(self, monitor):
+        import turbine_monitor as tm
+        self._prep(monitor, [tm.NotLoggedInError("not logged in"), StopLoop()])
+        monitor._login_to_turbine.side_effect = [None, ConnectionError('down'), None]
+        with patch('turbine_monitor.threading.Thread'), pytest.raises(StopLoop):
+            monitor.run()
+        monitor._reconnect_device.assert_called_once()
+        assert monitor.status['connected'] is False
+
+    def test_relogin_protocol_failure_falls_through_to_reconnect(self, monitor):
+        import turbine_monitor as tm
+        self._prep(monitor, [tm.NotLoggedInError("not logged in"), StopLoop()])
+        monitor._login_to_turbine.side_effect = [None, mnet.MnetFrameError('crc'), None]
+        with patch('turbine_monitor.threading.Thread'), pytest.raises(StopLoop):
+            monitor.run()
+        monitor._reconnect_device.assert_called_once()
+
+    @pytest.mark.parametrize('exc', [ConnectionError('down'), mnet.MnetFrameError('crc')],
+                             ids=lambda e: type(e).__name__)
+    def test_startup_login_failure_does_not_crash_run(self, monitor, exc):
+        self._prep(monitor, [StopLoop()])
+        monitor._login_to_turbine.side_effect = [exc, None]
+        with patch('turbine_monitor.threading.Thread'), pytest.raises(StopLoop):
+            monitor.run()
+        # reached the loop body (collect) after recovering, instead of crashing at startup
+        monitor._reconnect_device.assert_called_once()
+        monitor._collect_turbine_data.assert_called_once()
+
+    def test_failed_login_does_not_set_logged_in(self, monitor):
+        monitor.logged_in = False
+        monitor.mnet_client.login.side_effect = mnet.MnetDecodeError('bad reply')
+        with pytest.raises(mnet.MnetDecodeError):
+            monitor._login_to_turbine()
+        assert monitor.logged_in is False
+        assert not monitor.serial_lock.locked()
+
+
 class TestReconnect:
     def test_reconnect_is_atomic_and_tracks_login(self, monitor):
         seen = {}
@@ -219,6 +321,86 @@ class TestReconnect:
             monitor._reconnect_device()
         assert monitor.logged_in is False
         assert not monitor.serial_lock.locked()
+
+
+class TestRemoteDisplayProtocolErrors:
+    @pytest.mark.parametrize('exc', [mnet.MnetFrameError('crc'), mnet.MnetDecodeError('src')],
+                             ids=lambda e: type(e).__name__)
+    def test_protocol_error_is_reraised_not_swallowed(self, monitor, exc):
+        monitor.logged_in = True
+        monitor.logger = Mock()
+        monitor.mnet_client.get_remote_display.side_effect = exc
+        with pytest.raises(type(exc)):
+            monitor._collect_turbine_data()
+        monitor.mnet_client.request_multiple_data.assert_not_called()
+        monitor.logger.error.assert_called()
+
+    def test_protocol_error_in_collect_triggers_reconnect_via_run(self, monitor):
+        monitor.logged_in = True
+        monitor.mnet_client.get_remote_display.side_effect = mnet.MnetFrameError('crc')
+        monitor._execute_pending_command = Mock()
+        monitor._sync_controller_time = Mock()
+        monitor._publish_data = Mock(side_effect=StopLoop())
+        monitor._reconnect_device = Mock()
+        monitor._login_to_turbine = Mock()
+        # second iteration: reconnect "restored" login, display works, publish stops loop
+        def reconnect():
+            monitor.mnet_client.get_remote_display.side_effect = None
+            monitor.mnet_client.get_remote_display.return_value = b''
+            monitor.mnet_client.request_multiple_data.return_value = [0] * 17
+        monitor._reconnect_device.side_effect = reconnect
+        with patch('turbine_monitor.threading.Thread'), pytest.raises(StopLoop):
+            monitor.run()
+        monitor._reconnect_device.assert_called_once()
+        assert monitor.status['connected'] is False
+
+    def test_non_protocol_display_error_still_degrades_to_empty_display(self, monitor):
+        monitor.logged_in = True
+        monitor.logger = Mock()
+        monitor.mnet_client.get_remote_display.side_effect = KeyError('x')
+        monitor.mnet_client.request_multiple_data.return_value = [0] * 17
+        data = monitor._collect_turbine_data()
+        assert data['remote_display'] == []
+        monitor.logger.warning.assert_called()
+
+
+class TestStatusPayload:
+    def test_payload_has_utc_aware_timestamps(self, monitor):
+        from datetime import datetime
+        monitor.serial_number = 1234
+        monitor.mqtt_client.publish.return_value = Mock(rc=1)  # not SUCCESS: skip wait
+        monitor.logger = Mock()
+        monitor._publish_data({'wind_speed_mps': 0.0})
+        sent = monitor.socketio.emit.call_args_list[-1].args
+        assert sent[0] == 'status'
+        payload = sent[1]
+        assert payload['connected'] is True
+        for key in ('last_update', 'server_time'):
+            assert datetime.fromisoformat(payload[key]).utcoffset() is not None
+        assert datetime.fromisoformat(payload['server_time']) >= datetime.fromisoformat(payload['last_update'])
+
+    def test_payload_before_first_data_has_no_last_update(self, monitor):
+        payload = monitor._status_payload()
+        assert payload['last_update'] is None
+        assert payload['connected'] is False
+        assert 'server_time' in payload
+
+    def test_payload_does_not_mutate_shared_status(self, monitor):
+        monitor._status_payload()
+        assert 'server_time' not in monitor.status
+
+
+class TestTimeSyncProtocolErrors:
+    @pytest.mark.parametrize('exc', [mnet.MnetFrameError('crc'), mnet.MnetDecodeError('src')],
+                             ids=lambda e: type(e).__name__)
+    def test_protocol_error_is_caught_and_backs_off(self, monitor, exc):
+        monitor.logger = Mock()
+        monitor.mnet_client.set_controller_time.side_effect = exc
+        monitor._sync_controller_time()  # must not raise
+        monitor._sync_controller_time()  # inside backoff window: no second attempt
+        assert monitor.mnet_client.set_controller_time.call_count == 1
+        monitor.logger.error.assert_called()
+        assert monitor.last_time_sync is None
 
 
 class TestTimeSyncBackoff:
@@ -298,7 +480,42 @@ class TestMqttRecovery:
         result = Mock(rc=paho.MQTT_ERR_SUCCESS)
         monitor.mqtt_client.publish.return_value = result
         monitor._publish_data({'wind_speed_mps': 1.0})
-        result.wait_for_publish.assert_called_once()
+        result.wait_for_publish.assert_called_once_with(timeout=monitor.MQTT_PUBLISH_TIMEOUT)
+
+    def test_publish_timeout_offline_warns_and_continues(self, monitor):
+        import paho.mqtt.client as paho
+        monitor.serial_number = 1234
+        monitor.logger = Mock()
+        result = Mock(rc=paho.MQTT_ERR_SUCCESS)
+        result.is_published.return_value = False  # wait returned on timeout
+        monitor.mqtt_client.publish.return_value = result
+        monitor._log_mqtt = Mock()
+        monitor._publish_data({'wind_speed_mps': 1.0})  # must not raise or block
+        monitor.logger.warning.assert_called()
+        monitor._log_mqtt.assert_not_called()
+        assert monitor.status['connected'] is True  # turbine data is still good
+        assert monitor.latest_data == {'wind_speed_mps': 1.0}
+
+    @pytest.mark.parametrize('exc', [ValueError('queue full'), RuntimeError('failed')])
+    def test_wait_for_publish_errors_do_not_crash(self, monitor, exc):
+        import paho.mqtt.client as paho
+        monitor.serial_number = 1234
+        monitor.logger = Mock()
+        result = Mock(rc=paho.MQTT_ERR_SUCCESS)
+        result.wait_for_publish.side_effect = exc
+        monitor.mqtt_client.publish.return_value = result
+        monitor._publish_data({'wind_speed_mps': 1.0})
+        monitor.logger.warning.assert_called()
+
+    def test_publish_confirmed_is_logged(self, monitor):
+        import paho.mqtt.client as paho
+        monitor.serial_number = 1234
+        result = Mock(rc=paho.MQTT_ERR_SUCCESS)
+        result.is_published.return_value = True
+        monitor.mqtt_client.publish.return_value = result
+        monitor._log_mqtt = Mock()
+        monitor._publish_data({'wind_speed_mps': 1.0})
+        monitor._log_mqtt.assert_called_once()
 
 
 class TestTransactionIdentityValidation:
@@ -328,12 +545,46 @@ class TestTransactionIdentityValidation:
         # Setup mock to return packet with correct source
         good_response = MagicMock()
         good_response.source = b'\x02'  # Expected source (controller)
+        good_response.destination = mnet.id  # Addressed back to us
+        good_response.packet_type = b'\x0c\x28'  # Echoes request type
         good_response.data = b'test'
         
         mnet.read_packet = MagicMock(return_value=good_response)
         
         result = mnet.send_packet(b'\x02', b'\x0c\x28', b'')
         assert result == good_response
+
+    def test_send_packet_validates_response_destination(self):
+        """send_packet should reject replies addressed to someone else."""
+        mnet = Mnet(MagicMock())
+        bad_response = MagicMock()
+        bad_response.source = b'\x02'
+        bad_response.destination = b'\x77'  # Not our id
+        bad_response.packet_type = b'\x0c\x28'
+        mnet.read_packet = MagicMock(return_value=bad_response)
+
+        with pytest.raises(MnetDecodeError, match="response destination mismatch"):
+            mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+
+    def test_send_packet_validates_response_packet_type(self):
+        """send_packet should reject replies that don't echo the request type."""
+        mnet = Mnet(MagicMock())
+        bad_response = MagicMock()
+        bad_response.source = b'\x02'
+        bad_response.destination = mnet.id
+        bad_response.packet_type = b'\x0c\x2a'  # Request was 0x0c28
+        mnet.read_packet = MagicMock(return_value=bad_response)
+
+        with pytest.raises(MnetDecodeError, match="response packet type mismatch"):
+            mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+
+    def test_send_packet_accepts_fully_matching_wire_response(self):
+        """A real framed reply (dst=our id, src=controller, same type) passes."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x28', 2, b'\x9c\x43'))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+        assert result.data == b'\x9c\x43'
     
     def test_collect_turbine_data_checks_logged_in(self):
         """_collect_turbine_data should raise if not logged in."""

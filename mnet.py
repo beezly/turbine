@@ -300,10 +300,12 @@ class Mnet:
     def send_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
         """Send packet and return response.
         
-        Validates that the response comes from the expected destination (controller).
+        Validates the reply's identity: it must come from the device we addressed,
+        be addressed back to us, and echo the request's packet type.
         
         Raises:
-            MnetDecodeError: if response source does not match expected destination
+            MnetDecodeError: if the response source, destination or packet type
+                does not match the request
         """
         packet = self.create_packet(destination, packet_type, data)
         packet_bytes = bytes(packet)
@@ -320,6 +322,18 @@ class Mnet:
             raise MnetDecodeError(
                 f"response source mismatch: expected 0x{destination.hex()}, "
                 f"got 0x{response.source.hex()}")
+
+        # Validate response is addressed back to us
+        if response.destination != self.id:
+            raise MnetDecodeError(
+                f"response destination mismatch: expected 0x{self.id.hex()}, "
+                f"got 0x{response.destination.hex()}")
+
+        # Validate response echoes the request's packet type
+        if response.packet_type != packet_type:
+            raise MnetDecodeError(
+                f"response packet type mismatch: expected 0x{packet_type.hex()}, "
+                f"got 0x{response.packet_type.hex()}")
         
         # Log incoming response
         if self._log_callback:
@@ -328,26 +342,38 @@ class Mnet:
         
         return response
     
+    def _read_exact(self, size: int, what: str) -> bytes:
+        """Read exactly size bytes, looping over partial reads.
+
+        TCP and serial reads may return fewer bytes than requested. An empty read
+        means EOF, a closed connection or a serial timeout, so give up rather than spin.
+
+        Raises:
+            MnetFrameError: the device returned no data before size bytes arrived.
+        """
+        buf = b''
+        while len(buf) < size:
+            chunk = self.device.read(size - len(buf))
+            if not chunk:
+                raise MnetFrameError(
+                    f"short {what} read: {len(buf)} of {size} bytes (connection closed or timed out)")
+            buf += chunk
+        return buf
+
     def read_packet(self) -> MnetPacket:
         """Read and validate a packet from the device.
 
         Raises:
             MnetFrameError: short read, bad SOH/EOT delimiter, or CRC mismatch.
         """
-        header = self.device.read(6)
-        if len(header) != 6:
-            raise MnetFrameError(f"short header read: {len(header)} of 6 bytes")
+        header = self._read_exact(6, 'header')
         soh, destination, source, packet_type, data_len = struct.unpack('!BBBHB', header)
         if soh != self.SOH[0]:
             raise MnetFrameError(f"bad SOH: 0x{soh:02x}")
 
-        data = self.device.read(data_len) if data_len > 0 else b''
-        if len(data) != data_len:
-            raise MnetFrameError(f"short data read: {len(data)} of {data_len} bytes")
+        data = self._read_exact(data_len, 'data') if data_len > 0 else b''
 
-        tail = self.device.read(3)
-        if len(tail) != 3:
-            raise MnetFrameError(f"short tail read: {len(tail)} of 3 bytes")
+        tail = self._read_exact(3, 'tail')
         crc, eot = struct.unpack('!HB', tail)
         if eot != self.EOT[0]:
             raise MnetFrameError(f"bad EOT: 0x{eot:02x}")

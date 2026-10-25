@@ -23,6 +23,10 @@ from flask_socketio import SocketIO, emit
 import mnet
 
 
+class NotLoggedInError(RuntimeError):
+    """Data collection was attempted while not logged in to the controller."""
+
+
 class TurbineMonitor:
     """Wind turbine monitoring and MQTT publishing."""
 
@@ -30,6 +34,7 @@ class TurbineMonitor:
     DESTINATION = b'\x02'
     POLL_INTERVAL = 1.0
     ERROR_RETRY_DELAY = 10.0
+    MQTT_PUBLISH_TIMEOUT = 5.0  # Max seconds to wait for a publish to be acknowledged
     INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
     TIME_SYNC_INTERVAL = 14400  # Sync controller time every 4 hours (in seconds)
     TIME_SYNC_RETRY_INITIAL = 60.0  # First retry delay after a failed time sync
@@ -323,7 +328,7 @@ class TurbineMonitor:
 
         @self.socketio.on('connect')
         def handle_connect():
-            emit('status', self.status)
+            emit('status', self._status_payload())
             emit('data', self.latest_data)
             emit('login_state', self.login_state)
         
@@ -646,10 +651,10 @@ class TurbineMonitor:
         """Collect all turbine data using single multiple request.
         
         Raises:
-            RuntimeError: if not logged in
+            NotLoggedInError: (a RuntimeError) if not logged in
         """
         if not self.logged_in:
-            raise RuntimeError("Cannot collect data: not logged in to controller")
+            raise NotLoggedInError("Cannot collect data: not logged in to controller")
         
         # Get remote display screen
         with self.serial_lock:
@@ -658,6 +663,11 @@ class TurbineMonitor:
                 # Convert to ASCII, format as 18-char lines (matches controller LCD)
                 display_text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in remote_display)
                 display_lines = [display_text[i:i+18] for i in range(0, len(display_text), 18)]
+            except (mnet.MnetFrameError, mnet.MnetDecodeError) as e:
+                # The stream can't be trusted after a bad frame: surface it so run()
+                # reconnects, rather than publishing data with an empty display.
+                self.logger.error(f"Protocol error reading remote display: {e}")
+                raise
             except Exception as e:
                 self.logger.warning(f"Failed to get remote display: {e}")
                 display_lines = []
@@ -731,20 +741,34 @@ class TurbineMonitor:
         
         result = self.mqtt_client.publish(topic, payload)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
-            result.wait_for_publish()
-            self._log_mqtt('TX', topic, payload)
+            try:
+                result.wait_for_publish(timeout=self.MQTT_PUBLISH_TIMEOUT)
+            except (ValueError, RuntimeError) as e:
+                self.logger.warning(f"MQTT publish not confirmed: {e}")
+            else:
+                if result.is_published():
+                    self._log_mqtt('TX', topic, payload)
+                else:
+                    # Timed out (e.g. broker offline): paho keeps the message queued
+                    self.logger.warning(
+                        f"MQTT publish not confirmed within {self.MQTT_PUBLISH_TIMEOUT}s; continuing")
         else:
             # Broker down/queue full: wait_for_publish() would raise or hang. The
             # turbine data is still good, so keep the web UI live and carry on.
             self.logger.warning(f"MQTT publish failed rc={result.rc}: {mqtt.error_string(result.rc)}")
 
         self.latest_data = serializable_data
-        self.status['last_update'] = datetime.now().isoformat()
+        self.status['last_update'] = datetime.now(timezone.utc).isoformat()
         self.status['connected'] = True
         
         self.socketio.emit('data', serializable_data)
-        self.socketio.emit('status', self.status)
+        self.socketio.emit('status', self._status_payload())
     
+    def _status_payload(self) -> Dict[str, Any]:
+        """Status for the web UI: last_update is UTC-aware, and server_time is stamped
+        at emit so the browser can compute data age without trusting its own clock."""
+        return {**self.status, 'server_time': datetime.now(timezone.utc).isoformat()}
+
     def run(self):
         """Main monitoring loop."""
         self.logger.info("Starting turbine monitor")
@@ -757,11 +781,13 @@ class TurbineMonitor:
         web_thread.start()
         self.logger.info(f"Web interface started on port {self.web_port}")
         
-        # Login to turbine
-        self._login_to_turbine()
-
         while True:
             try:
+                # Log in first (startup, or after a failed reconnect). Inside the try so
+                # a failure here takes the same retry/reconnect path as any other error.
+                if not self.logged_in:
+                    self._login_to_turbine()
+
                 # Execute any pending commands
                 self._execute_pending_command()
 
@@ -774,26 +800,43 @@ class TurbineMonitor:
                 
                 time.sleep(self.POLL_INTERVAL)
                 
-            except (BrokenPipeError, ConnectionError, OSError) + self.PROTOCOL_ERRORS as e:
-                self.logger.error(f"Connection/protocol error ({type(e).__name__}): {e}")
-                self.status['connected'] = False
-                self.socketio.emit('status', self.status)
-                time.sleep(self.ERROR_RETRY_DELAY)
-
-                # Attempt reconnection
+            except NotLoggedInError as e:
+                # Not logged in (e.g. a prior reconnect failed part-way): retrying
+                # collection can never succeed, so log in again before the next poll.
+                self.logger.warning(f"{e}; attempting re-login")
                 try:
-                    self._reconnect_device()
-                except Exception as reconnect_error:
-                    self.logger.error(f"Reconnection failed: {reconnect_error}")
+                    self._login_to_turbine()
+                except (BrokenPipeError, ConnectionError, OSError) + self.PROTOCOL_ERRORS as login_error:
+                    self._recover_connection(login_error)
+                except Exception as login_error:
+                    self.logger.error(f"Re-login failed: {login_error}")
                     self.logger.error(traceback.format_exc())
+                    time.sleep(self.ERROR_RETRY_DELAY)
+
+            except (BrokenPipeError, ConnectionError, OSError) + self.PROTOCOL_ERRORS as e:
+                self._recover_connection(e)
 
             except Exception as e:
                 self.logger.error(f"Monitor loop error: {e}")
                 self.logger.error(traceback.format_exc())
                 self.status['connected'] = False
-                self.socketio.emit('status', self.status)
+                self.socketio.emit('status', self._status_payload())
                 time.sleep(self.ERROR_RETRY_DELAY)
     
+    def _recover_connection(self, error: Exception):
+        """Log a connection/protocol error, back off, then reconnect and re-login."""
+        self.logger.error(f"Connection/protocol error ({type(error).__name__}): {error}")
+        self.status['connected'] = False
+        self.socketio.emit('status', self._status_payload())
+        time.sleep(self.ERROR_RETRY_DELAY)
+
+        # Attempt reconnection
+        try:
+            self._reconnect_device()
+        except Exception as reconnect_error:
+            self.logger.error(f"Reconnection failed: {reconnect_error}")
+            self.logger.error(traceback.format_exc())
+
     def _reconnect_device(self):
         """Reconnect to the serial/network device after connection loss."""
         self.logger.info("Attempting to reconnect to turbine...")
