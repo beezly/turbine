@@ -615,3 +615,48 @@ not have been recorded as fact.
 
 Honesty gating, wave-forcing parameters, DPR/FPS caps, hidden-tab
 suspension, and reduced-motion handling unchanged throughout.
+
+## Wheat field rebuild (2026-10-25, late)
+
+The field was rebuilt from scratch (`_buildWheat()`, replacing `_buildGrass()`)
+because it still read as sparse straws on mud. Root causes found:
+
+- **Placement PRNG bug.** The LCG used for placement returned
+  `(seed % 100000) / 100000`, which keeps only the generator's low bits,
+  and those have very short periods. 64,000 draws landed on only ~4,600
+  distinct spots, so most instances were stacked on top of each other. Every
+  previous density figure in this doc was affected. The wheat now uses
+  mulberry32.
+- **Sub-pixel geometry.** At the default camera (~46 m out, ~24 m up), one
+  pixel covers ~14 cm of field, so real-width stalks rasterise to almost
+  nothing. Ribbons now store centre + half-width separately, and the vertex
+  shader widens distant ones to ~1.2 px (capped at 60x).
+
+What the field is now:
+
+- **Tufts:** 64,000 desktop / 26,000 narrow, each 6 stalks (~380k / ~156k
+  stalks). Each stalk is a 3-segment ribbon with a nodding ear (two crossed
+  spindle-shaped planes) and a lighter fan of awns. Crop height is
+  0.75-0.95 m, with a gentle field-scale undulation. Full density out to
+  45 m from the tower, fading smoothly to none at 80 m.
+- **Bending:** the lean is length-preserving (an arc of the stalk's own
+  length), so heads come down as well as over. The gust-band model and
+  honesty gating are unchanged: only the intensity comes from
+  `wind_speed_mps`, and at intensity 0 the stalks are upright and still.
+- **Shading:** height-based self-shadowing (deep shade at the base, full
+  light at the ears), a per-ribbon sun/backlight term, and a gust "sheen"
+  so wind waves travel as bright bands.
+- **Canopy ground:** the ground is a shader surface. Under the stand it is
+  the shade between stalks. Between 46 and 70 m it rises to ear height and
+  becomes the sunlit crop top, with matching speckle and the same gust
+  bands, so the field carries on to the horizon with no ring.
+- **Horizon:** the sky dome (200 m, camera-following) clips the ground, so
+  fog now reaches full strength at 195 m. Fog colour = the sky gradient's
+  horizon haze, and the dome itself is excluded from fog. The gradient was
+  remapped so v=0.5 (the horizon) is the haze colour.
+- **Safety net:** if rendered frames persistently arrive slower than 1.6x
+  the 30 fps cap, half the tufts are shed (down to a quarter). Placement
+  order is random, so the remaining prefix is still an even field.
+
+Measured on an Apple M4 Max (ANGLE/Metal): ~10M triangles desktop, frame
+cap held, fallback not triggered. Not yet measured on weak GPUs or phones.
