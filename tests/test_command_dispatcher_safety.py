@@ -471,6 +471,19 @@ class TestExecutorPhases:
         assert rec.state == CommandState.ACKNOWLEDGED
         assert rec.result['reply'] == '0c32'
 
+    def test_observed_0001_ack_is_acknowledged_not_unknown(self, monitor):
+        """Two live RESET attempts on 2026-10-25 (22:39:26 and 22:41:32 UTC)
+        showed this controller replying 0x0001 (Reply Acknowledge) to
+        REQ_COMMAND instead of echoing 0x0C32 -- the same quirk already
+        fixed for both logins. This mirrors the pre-hardening behaviour
+        where ANY syntactically valid command reply counted as success,
+        restored narrowly for this one additional reply type rather than
+        reverted to accepting anything."""
+        monitor.mnet_client.send_command.return_value = Mock(packet_type=b'\x00\x01')
+        rec = self._run(monitor)
+        assert rec.state == CommandState.ACKNOWLEDGED
+        assert rec.result['reply'] == '0001'
+
     def test_login_failure_before_send_is_rejected_never_sent(self, monitor):
         monitor.mnet_client.login_standard.side_effect = RuntimeError('bad password')
         rec = self._run(monitor)

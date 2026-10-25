@@ -713,10 +713,19 @@ class TurbineMonitor:
                     self.logger.info("Executing control command: %s", name)
                     result = self.mnet_client.send_command(self.DESTINATION, cmd)
                     packet_type = getattr(result, 'packet_type', None)
-                    # send_packet already enforces the reply type; re-check so a
-                    # malformed or nack-shaped reply is never treated as success.
+                    # send_packet already enforces the reply type; re-check here
+                    # too (defense in depth against a mocked/misbehaving client
+                    # bypassing send_packet) so a malformed or nack-shaped reply
+                    # is never treated as success. Read the accepted set from
+                    # mnet.Mnet.REQUEST_RESPONSE_TYPES (same source of truth
+                    # send_packet uses) rather than hardcoding the bare 0x0C32
+                    # echo, so this stays in sync with the documented +
+                    # hardware-observed-quirk reply set for REQ_COMMAND instead
+                    # of silently re-introducing the exact-echo-only regression.
+                    valid_command_replies = mnet.Mnet.REQUEST_RESPONSE_TYPES.get(
+                        mnet.Mnet.REQ_COMMAND, frozenset({mnet.Mnet.REQ_COMMAND}))
                     if not isinstance(packet_type, (bytes, bytearray)) or \
-                            bytes(packet_type) != mnet.Mnet.REQ_COMMAND:
+                            bytes(packet_type) not in valid_command_replies:
                         raise ValueError('unexpected command reply: %r' % (packet_type,))
                     reply = bytes(packet_type).hex()
                 except Exception as e:
