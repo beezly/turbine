@@ -1,4 +1,6 @@
 <!DOCTYPE html>
+<!-- NOT SERVED: Flask renders templates/index.html (see index() in turbine_monitor.py).
+     This alternate layout shows live socket data only; it has no demo/mock mode. -->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -460,8 +462,8 @@
             <div class="header-left">
                 <div class="logo">Wind Monitor</div>
                 <div class="status-indicator">
-                    <div class="status-dot connected" id="statusDot"></div>
-                    <span id="statusText">Connected</span>
+                    <div class="status-dot loading" id="statusDot"></div>
+                    <span id="statusText">Connecting…</span>
                 </div>
             </div>
             <div class="header-right">
@@ -604,27 +606,8 @@
     </div>
 
     <script>
-        // Mock data for offline testing
-        const MOCK_DATA = {
-            wind_speed_mps: 8.5,
-            power_W: 45000,
-            rotor_rpm: 22.5,
-            generator_rpm: 1200,
-            l1v: 230,
-            l2v: 231,
-            l3v: 229,
-            status_message: "POWER GENERATION",
-            current_status_code_0: 3,
-            current_status_code_1: 0,
-            power_W_10min: 42000,
-            runtime_1_sec: 123456,
-            runtime_2_sec: 654321,
-            controller_time: "2026-10-25 14:32:00 UTC"
-        };
-
         let socket = null;
         let isConnected = false;
-        let isMockMode = false;
 
         // Initialize Socket.IO
         function initSocket() {
@@ -632,7 +615,7 @@
 
             socket.on('connect', () => {
                 isConnected = true;
-                updateStatus('connected');
+                updateStatus('loading');   // socket up != turbine data live; 'status' decides
                 console.log('Socket connected');
             });
 
@@ -657,8 +640,16 @@
             socket.on('error', (error) => {
                 console.error('Socket error:', error);
                 if (!isConnected) {
-                    enableMockMode();
+                    updateStatus('unavailable');
                 }
+            });
+
+            socket.on('command_result', (r) => {
+                const feedback = document.getElementById('commandFeedback');
+                const label = (r.command || 'command').toUpperCase();
+                feedback.textContent = r.ok
+                    ? `${label} sent — reply 0x${r.reply}`
+                    : `${label} failed: ${r.error || 'unknown error'}`;
             });
         }
 
@@ -690,7 +681,7 @@
             document.getElementById('windSpeed').textContent = formatValue(data.wind_speed_mps);
             document.getElementById('power').textContent = formatValue(data.power_W, 0);
             document.getElementById('rotorRpm').textContent = formatValue(data.rotor_rpm);
-            document.getElementById('statusCode').textContent = data.current_status_code_0 || '--';
+            document.getElementById('statusCode').textContent = formatValue(data.current_status_code_0, 0);
             
             document.getElementById('powerCurrent').textContent = formatValue(data.power_W, 0);
             document.getElementById('power10min').textContent = formatValue(data.power_W_10min, 0);
@@ -705,66 +696,29 @@
             document.getElementById('runtime1').textContent = formatValue(data.runtime_1_sec, 0);
             document.getElementById('runtime2').textContent = formatValue(data.runtime_2_sec, 0);
             
-            document.getElementById('statusMessage').textContent = data.status_message || '--';
+            const msg = data.status_message;
+            document.getElementById('statusMessage').textContent =
+                (msg === null || msg === undefined || msg === '') ? '--' : String(msg);
             
             // Update timestamp
             const now = new Date();
             document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
         }
 
-        // Enable mock mode for offline testing
-        function enableMockMode() {
-            if (isMockMode) return;
-            isMockMode = true;
-            updateStatus('loading');
-            console.log('Enabling mock mode for offline testing');
-            
-            // Update with mock data
-            updateMetrics(MOCK_DATA);
-            updateStatus('connected');
-            
-            // Simulate periodic updates with small variance
-            setInterval(() => {
-                const variedData = { ...MOCK_DATA };
-                variedData.wind_speed_mps += (Math.random() - 0.5) * 2;
-                variedData.power_W += (Math.random() - 0.5) * 5000;
-                variedData.rotor_rpm += (Math.random() - 0.5) * 1;
-                updateMetrics(variedData);
-            }, 2000);
-        }
-
-        // Send command
+        // Send command (live backend only; success is reported by 'command_result')
         function sendCommand(command) {
-            if (!isConnected && !isMockMode) {
+            if (!isConnected || !socket) {
                 alert('Not connected to server');
                 return;
             }
 
-            const feedback = document.getElementById('commandFeedback');
-            feedback.textContent = `Sending: ${command}...`;
-            
-            if (isMockMode) {
-                setTimeout(() => {
-                    feedback.textContent = `✓ ${command} sent (mock)`;
-                }, 300);
-            } else if (socket) {
-                socket.emit('command', command);
-                setTimeout(() => {
-                    feedback.textContent = `✓ ${command} sent`;
-                }, 300);
-            }
+            document.getElementById('commandFeedback').textContent = `Sending: ${command}...`;
+            socket.emit('command', command);
         }
 
         // Initialize on page load
         document.addEventListener('DOMContentLoaded', () => {
             initSocket();
-            
-            // Enable mock mode after 5 seconds if not connected
-            setTimeout(() => {
-                if (!isConnected) {
-                    enableMockMode();
-                }
-            }, 5000);
             
             // Clear feedback message after 3 seconds
             const observer = new MutationObserver(() => {
@@ -779,27 +733,10 @@
             observer.observe(document.getElementById('commandFeedback'), { childList: true, characterData: true, subtree: true });
         });
 
-        // Pause rendering when tab is hidden (performance)
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) {
-                console.log('Tab hidden - pausing updates');
-            } else {
-                console.log('Tab visible - resuming updates');
-            }
-        });
-
-        // Log Babylon.js support
-        window.addEventListener('load', () => {
-            const hasWebGL = (() => {
-                try {
-                    const canvas = document.createElement('canvas');
-                    return !!(window.WebGLRenderingContext && (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
-                } catch (e) {
-                    return false;
-                }
-            })();
-            console.log('WebGL Support:', hasWebGL ? 'Available' : 'Unavailable (fallback will be used)');
-        });
+        // No visibilitychange handler: after removing the mock simulation there is no
+        // polling, timer-driven rendering or animation loop to pause. Updates are
+        // event-driven from socket 'data' events, and the feedback-clear timeouts are
+        // one-shot.
     </script>
 </body>
 </html>

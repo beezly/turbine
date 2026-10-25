@@ -3,6 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#050a12">
     <title>Turbine Control</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -23,10 +25,16 @@
             --accent-rose: #fb7185;
             --text-primary: #f1f5f9;
             --text-secondary: #94a3b8;
-            --text-muted: #64748b;
+            --text-muted: #7c8a9e;  /* >=4.5:1 on --bg-primary (was #64748b, ~4.1:1) */
+            --state-live: #34d399;
+            --state-stale: #fbbf24;
+            --state-loading: #38bdf8;
+            --state-down: #fb7185;
             --glow-cyan: 0 0 30px rgba(56, 189, 248, 0.3);
             --glow-teal: 0 0 30px rgba(45, 212, 191, 0.3);
         }
+
+        :root { color-scheme: dark; }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -80,6 +88,8 @@
             display: flex;
             align-items: center;
             justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 20px;
             margin-bottom: 40px;
             padding-bottom: 30px;
             border-bottom: 1px solid var(--border-subtle);
@@ -127,6 +137,7 @@
         .header-right {
             display: flex;
             align-items: center;
+            flex-wrap: wrap;
             gap: 20px;
         }
 
@@ -151,8 +162,24 @@
         }
 
         .status-dot.connected {
-            background: var(--accent-emerald);
-            box-shadow: 0 0 12px var(--accent-emerald);
+            background: var(--state-live);
+            box-shadow: 0 0 12px var(--state-live);
+        }
+
+        /* Not-live states. Socket connected != turbine reporting healthy data. */
+        .status-dot.loading {
+            background: var(--state-loading);
+            box-shadow: 0 0 12px var(--state-loading);
+        }
+
+        .status-dot.stale {
+            background: var(--state-stale);
+            box-shadow: 0 0 12px var(--state-stale);
+        }
+
+        .status-dot.unavailable {
+            background: var(--state-down);
+            box-shadow: 0 0 12px var(--state-down);
         }
 
         @keyframes pulse {
@@ -172,13 +199,34 @@
             font-family: 'JetBrains Mono', monospace;
         }
 
+        .last-update.stale { color: var(--state-stale); }
+        .last-update.unavailable { color: var(--state-down); }
+
+        /* Readings from a stale / disconnected source are dimmed so a held value
+           (including a held 0) is not mistaken for a live reading. */
+        .dashboard.is-stale .hero-value,
+        .dashboard.is-stale .metric-value,
+        .dashboard.is-stale .status-item-value,
+        .dashboard.is-stale .lcd-display {
+            opacity: 0.45;
+        }
+
+        .hero-value,
+        .metric-value,
+        .status-item-value {
+            font-variant-numeric: tabular-nums;
+            transition: opacity 0.3s ease;
+        }
+
         /* Control buttons */
         .controls {
             display: flex;
+            flex-wrap: wrap;
             gap: 8px;
         }
 
         .btn {
+            min-height: 40px;
             padding: 10px 18px;
             border: none;
             border-radius: 8px;
@@ -259,6 +307,15 @@
         }
 
         .btn:disabled { opacity: 0.4; cursor: not-allowed; filter: grayscale(0.6); }
+
+        .btn:focus-visible,
+        .log-tab:focus-visible,
+        .history-tab:focus-visible,
+        .history-select:focus-visible,
+        .history-checkbox input:focus-visible {
+            outline: 2px solid var(--accent-cyan);
+            outline-offset: 2px;
+        }
 
         /* Login / control state indicator */
         .login-state {
@@ -946,6 +1003,22 @@
                 justify-content: center;
             }
         }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
+        @media (prefers-contrast: more) {
+            :root {
+                --text-secondary: #cad1db;
+                --text-muted: #a3afbf;
+                --border-subtle: rgba(56, 189, 248, 0.25);
+            }
+        }
     </style>
 </head>
 <body>
@@ -964,11 +1037,11 @@
             </div>
 
             <div class="header-right">
-                <div class="status-badge">
-                    <div id="statusDot" class="status-dot"></div>
-                    <span id="statusText" class="status-text">Disconnected</span>
+                <div class="status-badge" role="status" aria-live="polite">
+                    <div id="statusDot" class="status-dot loading"></div>
+                    <span id="statusText" class="status-text">Connecting…</span>
                 </div>
-                <div id="lastUpdate" class="last-update"></div>
+                <div id="lastUpdate" class="last-update">no data received yet</div>
 
                 <div class="login-state" id="loginState" title="Login/control state">
                     <span class="login-dot" id="loginDot"></span>
@@ -976,7 +1049,7 @@
                     <span class="login-detail" id="loginDetail">monitoring (read-only)</span>
                 </div>
 
-                <div class="controls">
+                <div class="controls" role="group" aria-label="Turbine control">
                     <button class="btn btn-start" onclick="sendCommand('start')">Start</button>
                     <button class="btn btn-stop" onclick="sendCommand('stop')">Stop</button>
                     <button class="btn btn-reset" onclick="sendCommand('reset')">Reset</button>
@@ -984,11 +1057,11 @@
                     <button class="btn btn-ghost" onclick="sendCommand('auto')">Auto</button>
                     <button class="btn btn-ghost" onclick="sendCommand('ack')">Ack&nbsp;Alarm</button>
                 </div>
-                <div class="command-feedback" id="commandFeedback"></div>
+                <div class="command-feedback" id="commandFeedback" role="status" aria-live="polite"></div>
             </div>
         </header>
 
-        <main class="dashboard">
+        <main class="dashboard" id="dashboard">
             <!-- Hero wind speed -->
             <div class="hero-metric">
                 <span class="hero-label">Wind Speed</span>
@@ -1223,30 +1296,124 @@
         let lastEventsRefresh = 0;
         const EVENTS_REFRESH_INTERVAL = 10000; // 10 seconds minimum between auto-refreshes
 
+        // ---- Connection / data health --------------------------------------
+        // Three separate facts, never conflated:
+        //   socketUp          - browser <-> this web server
+        //   turbineConnected  - server's last report of its link to the controller
+        //   data age          - how long since the server last published turbine data
+        // "Live" requires all three; anything else dims the readings.
+        const STALE_AFTER_MS = 15000;   // POLL_INTERVAL is 1s; error retry back-off is 10s
+        let socketUp = false;
+        let everConnected = false;
+        let turbineConnected = null;    // null until the first 'status' event
+        let dataClock = null;           // {ageAtReceipt, receivedAt} from backend timestamps
+        let healthTimer = null;
+
+        function dataAgeMs() {
+            if (!dataClock) return null;
+            return dataClock.ageAtReceipt + (performance.now() - dataClock.receivedAt);
+        }
+
+        function formatAge(ms) {
+            const s = Math.max(0, Math.floor(ms / 1000));
+            if (s < 60) return `${s}s`;
+            if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+            return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+        }
+
+        function renderHealth() {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            const upd = document.getElementById('lastUpdate');
+            const age = dataAgeMs();
+
+            let state, label;
+            if (!socketUp) {
+                state = everConnected ? 'unavailable' : 'loading';
+                label = everConnected ? 'Server unreachable' : 'Connecting…';
+            } else if (turbineConnected === null) {
+                state = 'loading';
+                label = 'Waiting for status…';
+            } else if (!turbineConnected) {
+                state = 'unavailable';
+                label = 'Turbine link down';
+            } else if (age === null) {
+                state = 'loading';
+                label = 'Waiting for data…';
+            } else if (age > STALE_AFTER_MS) {
+                state = 'stale';
+                label = 'Stale data';
+            } else {
+                state = 'connected';
+                label = 'Live';
+            }
+
+            dot.className = 'status-dot ' + state;
+            text.textContent = label;
+            document.getElementById('dashboard').classList.toggle('is-stale', state !== 'connected');
+
+            upd.className = 'last-update' + (state === 'stale' || state === 'unavailable' ? ' ' + state : '');
+            upd.textContent = age === null
+                ? 'no data received yet'
+                : `last data ${formatAge(age)} ago (${new Date(Date.now() - age).toLocaleTimeString()})`;
+        }
+
+        function startHealthTimer() {
+            if (healthTimer === null) healthTimer = setInterval(renderHealth, 1000);
+        }
+
+        function stopHealthTimer() {
+            if (healthTimer !== null) { clearInterval(healthTimer); healthTimer = null; }
+        }
+
+        // The only periodic UI work is the once-a-second age readout; it is paused while
+        // the tab is hidden and re-rendered on return (age is derived from
+        // performance.now(), so nothing is lost while paused).
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                stopHealthTimer();
+            } else {
+                renderHealth();
+                startHealthTimer();
+            }
+        });
+
         socket.on('connect', function() {
             console.log('Connected to server');
+            socketUp = true;
+            everConnected = true;
+            renderHealth();
             // Load event stack on connect
             loadEventStack();
         });
 
-        socket.on('status', function(data) {
-            const statusDot = document.getElementById('statusDot');
-            const statusText = document.getElementById('statusText');
-            const lastUpdateEl = document.getElementById('lastUpdate');
+        socket.on('disconnect', function() {
+            socketUp = false;
+            renderHealth();
+        });
 
-            if (data.connected) {
-                statusDot.classList.add('connected');
-                statusText.textContent = 'Connected';
-            } else {
-                statusDot.classList.remove('connected');
-                statusText.textContent = 'Disconnected';
-            }
+        socket.on('status', function(data) {
+            turbineConnected = !!data.connected;
 
             if (data.last_update) {
-                const date = new Date(data.last_update);
-                lastUpdateEl.textContent = date.toLocaleTimeString();
+                // Age on the server's own clock (server_time - last_update), so browser
+                // clock skew can't fake freshness; fall back to the browser clock only if
+                // the server didn't send server_time.
+                const sent = Date.parse(data.server_time);
+                const updated = Date.parse(data.last_update);
+                const age = Number.isNaN(sent) ? Date.now() - updated : sent - updated;
+                dataClock = Number.isNaN(updated)
+                    ? null
+                    : { ageAtReceipt: Math.max(0, age), receivedAt: performance.now() };
+            } else {
+                dataClock = null;   // server has not published any turbine data yet
             }
+
+            renderHealth();
         });
+
+        renderHealth();
+        if (!document.hidden) startHealthTimer();
 
         socket.on('data', function(data) {
             updateMetric('windSpeed', data.wind_speed_mps, 1);
@@ -1257,8 +1424,8 @@
             updateMetric('l2v', data.l2v, 0, ' V');
             updateMetric('l3v', data.l3v, 0, ' V');
 
-            document.getElementById('statusMessage').textContent = data.status_message || '--';
-            document.getElementById('controllerTime').textContent = data.controller_time || '--';
+            document.getElementById('statusMessage').textContent = textOrDash(data.status_message);
+            document.getElementById('controllerTime').textContent = textOrDash(data.controller_time);
             document.getElementById('runtime1').textContent = formatRuntime(data.runtime_1_sec);
             document.getElementById('runtime2').textContent = formatRuntime(data.runtime_2_sec);
 
@@ -1292,17 +1459,22 @@
             ).join('');
         }
 
+        // '--' only for a genuinely missing value: a real 0 must render as "0".
         function updateMetric(id, value, decimals = 0, suffix = '') {
             const el = document.getElementById(id);
-            if (value !== null && value !== undefined) {
+            if (typeof value === 'number' && Number.isFinite(value)) {
                 el.textContent = value.toFixed(decimals) + suffix;
             } else {
                 el.textContent = '--';
             }
         }
 
+        function textOrDash(value) {
+            return (value === null || value === undefined || value === '') ? '--' : String(value);
+        }
+
         function formatRuntime(seconds) {
-            if (seconds === null || seconds === undefined) return '--';
+            if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return '--';
             const hrs = Math.floor(seconds / 3600);
             const mins = Math.floor((seconds % 3600) / 60);
             const secs = Math.floor(seconds % 60);

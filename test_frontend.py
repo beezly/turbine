@@ -69,7 +69,6 @@ def test_frontend():
         'button-primary', 'button-danger', 'button-secondary',
         'hero-metric', 'card',
         'prefers-reduced-motion', 'prefers-contrast',
-        'WebGL', 'mock',
         'socket.io'
     ]
     
@@ -98,7 +97,9 @@ def test_frontend():
         'prefers-contrast',
         'aria', 'role'
     ]
-    for feature in a11y_features[:4]:  # Skip aria/role check as they're optional in this template
+    # aria/role are not asserted: this template has none. (The old check only 'passed' because
+    # the substring 'aria' occurs inside the identifier 'variedData'.)
+    for feature in a11y_features[:3]:
         assert feature in content, f"Missing a11y feature: {feature}"
         print(f"  ✓ {feature}")
     
@@ -114,13 +115,11 @@ def test_frontend():
         assert var in content, f"Missing contrast variable: {var}"
         print(f"  ✓ {var}")
     
-    # 6. Check mock data for offline testing
-    print("\n✓ Offline Mock Data:")
-    assert 'MOCK_DATA' in content, "Mock data not found"
-    assert 'enableMockMode' in content, "Mock mode function not found"
-    print(f"  ✓ Mock data object")
-    print(f"  ✓ enableMockMode() function")
-    print(f"  ✓ Auto-fallback after 5 seconds")
+    # 6. The template must NOT simulate data: no mock telemetry or mock-mode auto-fallback
+    print("\n✓ No simulated telemetry:")
+    for forbidden in ('MOCK_DATA', 'enableMockMode', 'isMockMode', 'variedData'):
+        assert forbidden not in content, f"Simulated-data code present: {forbidden}"
+        print(f"  ✓ no {forbidden}")
     
     # 7. Check state management
     print("\n✓ State Management:")
@@ -133,15 +132,10 @@ def test_frontend():
         assert check in content, f"Missing state check: {check}"
         print(f"  ✓ {check}")
     
-    # 8. Check performance optimizations
-    print("\n✓ Performance Features:")
-    perf_features = [
-        'visibilitychange', 'Pause rendering',
-        'WebGL Support'
-    ]
-    for feature in perf_features:
-        assert feature in content, f"Missing perf feature: {feature}"
-        print(f"  ✓ {feature}")
+    # 8. No visibilitychange handler is expected: v2 has no timer/animation loop to pause
+    print("\n✓ Rendering:")
+    assert 'setInterval' not in content, "unexpected timer-driven rendering"
+    print("  ✓ no setInterval (event-driven only)")
     
     # 9. Report statistics
     print("\n✓ Template Statistics:")
@@ -157,16 +151,11 @@ def test_frontend():
     
     # 10. Summary
     print("\n" + "=" * 70)
-    print("✅ ALL FRONTEND VALIDATION CHECKS PASSED")
+    print("✅ ALL SOURCE-TEXT CHECKS PASSED (not a rendering, accessibility or performance test)")
     print("=" * 70)
-    print("\nTemplate ready for deployment:")
+    print("\nChecked (source-text checks only; nothing was rendered or measured):")
     print(f"  • Location: {template_path.resolve()}")
     print(f"  • Size: {template_size:,} bytes")
-    print(f"  • Responsive: Yes (desktop/tablet/mobile)")
-    print(f"  • Accessibility: WCAG AA")
-    print(f"  • Offline Support: Yes (mock mode)")
-    print(f"  • Performance: Optimized")
-    print(f"  • Browser Support: Modern browsers (Chrome 90+, Firefox 88+, Safari 14+)")
     
     return True
 
