@@ -4,12 +4,12 @@ No serial hardware or MQTT broker is touched: devices are in-memory fakes and
 the paho client / Mnet client are replaced with mocks.
 """
 import struct
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 import pytest
 
 import mnet
-from mnet import Mnet, MnetPacket
+from mnet import Mnet, MnetPacket, MnetDecodeError
 
 
 # ---------------------------------------------------------------- helpers
@@ -299,3 +299,75 @@ class TestMqttRecovery:
         monitor.mqtt_client.publish.return_value = result
         monitor._publish_data({'wind_speed_mps': 1.0})
         result.wait_for_publish.assert_called_once()
+
+
+class TestTransactionIdentityValidation:
+    """Test transaction identity validation for protocol robustness."""
+    
+    def test_send_packet_validates_response_source(self):
+        """send_packet should reject responses from unexpected source."""
+        mock_device = MagicMock()
+        mnet = Mnet(mock_device)
+        
+        # Setup mock to return packet with wrong source
+        bad_response = MagicMock()
+        bad_response.source = b'\x99'  # Wrong source
+        bad_response.data = b''
+        
+        mnet.read_packet = MagicMock(return_value=bad_response)
+        
+        # Should raise MnetDecodeError
+        with pytest.raises(MnetDecodeError, match="response source mismatch"):
+            mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+    
+    def test_send_packet_accepts_matching_source(self):
+        """send_packet should accept responses from expected source."""
+        mock_device = MagicMock()
+        mnet = Mnet(mock_device)
+        
+        # Setup mock to return packet with correct source
+        good_response = MagicMock()
+        good_response.source = b'\x02'  # Expected source (controller)
+        good_response.data = b'test'
+        
+        mnet.read_packet = MagicMock(return_value=good_response)
+        
+        result = mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+        assert result == good_response
+    
+    def test_collect_turbine_data_checks_logged_in(self):
+        """_collect_turbine_data should raise if not logged in."""
+        monitor = MagicMock()
+        monitor.logged_in = False
+        monitor.serial_lock = MagicMock()
+        monitor.serial_lock.__enter__ = MagicMock()
+        monitor.serial_lock.__exit__ = MagicMock()
+        
+        # Bind method to monitor
+        from turbine_monitor import TurbineMonitor
+        method = TurbineMonitor._collect_turbine_data.__get__(monitor, TurbineMonitor)
+        
+        with pytest.raises(RuntimeError, match="not logged in"):
+            method()
+    
+    def test_collect_turbine_data_proceeds_when_logged_in(self):
+        """_collect_turbine_data should proceed when logged in."""
+        monitor = MagicMock()
+        monitor.logged_in = True
+        monitor.serial_lock = MagicMock()
+        monitor.serial_lock.__enter__ = MagicMock()
+        monitor.serial_lock.__exit__ = MagicMock()
+        monitor.mnet_client = MagicMock()
+        monitor.mnet_client.get_remote_display.return_value = b''
+        monitor.mnet_client.request_multiple_data.return_value = [0] * 17
+        monitor.logger = MagicMock()
+        monitor.DESTINATION = b'\x02'
+        
+        # Bind method to monitor
+        from turbine_monitor import TurbineMonitor
+        method = TurbineMonitor._collect_turbine_data.__get__(monitor, TurbineMonitor)
+        
+        # Should not raise
+        result = method()
+        assert result is not None
+        assert 'remote_display' in result

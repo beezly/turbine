@@ -643,7 +643,14 @@ class TurbineMonitor:
                                                   self.TIME_SYNC_RETRY_MAX)
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
-        """Collect all turbine data using single multiple request."""
+        """Collect all turbine data using single multiple request.
+        
+        Raises:
+            RuntimeError: if not logged in
+        """
+        if not self.logged_in:
+            raise RuntimeError("Cannot collect data: not logged in to controller")
+        
         # Get remote display screen
         with self.serial_lock:
             try:

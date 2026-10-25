@@ -298,7 +298,13 @@ class Mnet:
         return MnetPacket(destination, self.id, packet_type, len(data), data)
     
     def send_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
-        """Send packet and return response."""
+        """Send packet and return response.
+        
+        Validates that the response comes from the expected destination (controller).
+        
+        Raises:
+            MnetDecodeError: if response source does not match expected destination
+        """
         packet = self.create_packet(destination, packet_type, data)
         packet_bytes = bytes(packet)
         
@@ -308,6 +314,12 @@ class Mnet:
         
         self.device.write(packet_bytes)
         response = self.read_packet()
+        
+        # Validate response came from expected source (the device we're talking to)
+        if response.source != destination:
+            raise MnetDecodeError(
+                f"response source mismatch: expected 0x{destination.hex()}, "
+                f"got 0x{response.source.hex()}")
         
         # Log incoming response
         if self._log_callback:
