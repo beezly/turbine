@@ -56,9 +56,11 @@ export class GaiaWind133Scene {
     const scene = new BABYLON.Scene(engine);
     scene.clearColor = new BABYLON.Color4(0.05, 0.08, 0.12, 1);
     scene.fogMode = BABYLON.Scene.FOGMODE_LINEAR;
-    scene.fogColor = new BABYLON.Color3(0.65, 0.75, 0.85);
-    scene.fogStart = 60;
-    scene.fogEnd = 220;
+    // Pale horizon haze (close to the sky gradient's horizon colour), starting
+    // well beyond the turbine so only the far field dissolves into it.
+    scene.fogColor = new BABYLON.Color3(0.78, 0.84, 0.88);
+    scene.fogStart = 80;
+    scene.fogEnd = 195; // fully hazed just inside the 200 m sky dome, which clips the ground
     this.scene = scene;
 
     // --- Camera: a restrained orbit camera, slight three-quarter yaw so
@@ -117,57 +119,7 @@ export class GaiaWind133Scene {
     shadowGenerator.bias = 0.002;
     this.shadowGenerator = shadowGenerator;
 
-    // --- Ground: muted, desaturated field with subtle procedural variation
-    // (a small dynamic-texture tint, not a flat uniform green) so it reads
-    // as a textured field rather than a cartoon plane. ---
-    const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 220, height: 220, subdivisions: 2 }, scene);
-    const groundMat = new BABYLON.StandardMaterial('groundMat', scene);
-    // Re-toned per review feedback: this is the SHADOWED BASE OF A WHEAT
-    // CANOPY, not bare soil. The near-field instanced canopy is now dense
-    // enough that almost none of this shows through, but any residual gap
-    // must read as shade-between-stalks (a dark gold/olive undertone close
-    // to the blade base color) rather than bright dirt -- bright soil
-    // showing through was the single biggest cause of the "patchy, grazed
-    // lawn" look in review. The texture also carries dense, fine golden/
-    // green mottling at a similar visual grain to the grass tint noise, so
-    // the far field (beyond the instanced canopy, where this texture is
-    // all that's visible) blends into the near field instead of reading
-    // as a visibly different, flatter material.
-    const groundTex = new BABYLON.DynamicTexture('groundTex', { width: 512, height: 512 }, scene, false);
-    const gctx = groundTex.getContext();
-    // Per explicit review correction: a dark olive-green ground under
-    // gold blades read as a discoloured blob sitting ON the ground, not
-    // the ground itself -- "ripe wheat fields are gold ground AND gold
-    // crop". Re-toned to the SAME gold family as the blade shader base
-    // color (see grass fragment shader below), not a different green hue.
-    gctx.fillStyle = '#4a3f18'; // dim wheat-gold shade base, matches blade hue family
-    gctx.fillRect(0, 0, 512, 512);
-    let seed = 1234567;
-    const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed % 1000) / 1000; };
-    for (let i = 0; i < 900; i++) {
-      const shade = rand();
-      // Golden range matching the wheat blade palette (see grass fragment
-      // shader base colors below); darker overall than the blades
-      // themselves since this represents shaded undergrowth/gaps, but the
-      // SAME hue family (gold), not a green undertone.
-      const r = Math.floor(58 + shade * 54);
-      const g = Math.floor(48 + shade * 46);
-      const b = Math.floor(14 + shade * 16);
-      gctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',0.6)';
-      const x = rand() * 512;
-      const y = rand() * 512;
-      const rad = 2 + rand() * 5;
-      gctx.beginPath();
-      gctx.arc(x, y, rad, 0, Math.PI * 2);
-      gctx.fill();
-    }
-    groundTex.update();
-    groundTex.uScale = 18;
-    groundTex.vScale = 18;
-    groundMat.diffuseTexture = groundTex;
-    groundMat.specularColor = new BABYLON.Color3(0.02, 0.02, 0.02);
-    ground.material = groundMat;
-    ground.receiveShadows = true;
+    // The ground is the wheat canopy surface: built with the crop in _buildWheat().
 
     // --- Sky: a vertical gradient (darker/more saturated blue at the
     // zenith fading to a pale, slightly warm horizon) instead of one flat
@@ -178,10 +130,13 @@ export class GaiaWind133Scene {
     const skyTex = new BABYLON.DynamicTexture('skyTex', { width: 16, height: 256 }, scene, false);
     const sctx = skyTex.getContext();
     const grad = sctx.createLinearGradient(0, 0, 0, 256);
-    grad.addColorStop(0, '#2f5d8f');   // zenith: deeper, more saturated blue
-    grad.addColorStop(0.55, '#7fa8cf'); // mid sky
-    grad.addColorStop(0.85, '#cfe0ea'); // near horizon: pale, slightly hazy
-    grad.addColorStop(1, '#e9ecdf');   // horizon haze, faint warm tint
+    // v runs zenith (0) -> nadir (1), so the horizon is v=0.5; the lower half
+    // is hidden by the field and stays at the haze colour.
+    grad.addColorStop(0, '#2f5d8f');    // zenith: deeper, more saturated blue
+    grad.addColorStop(0.3, '#6f9bc8');  // mid sky
+    grad.addColorStop(0.45, '#b4cbdd'); // near horizon: pale, slightly hazy
+    grad.addColorStop(0.5, '#c7d6e0');  // horizon haze, = scene.fogColor so the field dissolves into it
+    grad.addColorStop(1, '#c7d6e0');
     sctx.fillStyle = grad;
     sctx.fillRect(0, 0, 16, 256);
     skyTex.update();
@@ -191,10 +146,11 @@ export class GaiaWind133Scene {
     skyMat.disableLighting = true;
     sky1.material = skyMat;
     sky1.infiniteDistance = true;
+    sky1.applyFog = false; // the gradient already carries the horizon haze
 
     this._buildTurbine(shadowGenerator);
     this._buildField(shadowGenerator);
-    this._buildGrass();
+    this._buildWheat();
     // NOTE: the in-scene billboard "3D ILLUSTRATION" label plane
     // (_buildLabels(), still defined below for reference/possible reuse)
     // is intentionally NOT built here anymore. It rendered as illegible
@@ -409,205 +365,158 @@ export class GaiaWind133Scene {
   }
 
   /**
-   * Long meadow-grass field driven by real wind_speed_mps intensity only.
+   * Ripe wheat field, driven by real wind_speed_mps intensity only.
+   *
+   * Two layers that share one colour palette and one gust-wave field:
+   *  - Dense instanced tufts out to FIELD_RADIUS: curved stalks with nodding
+   *    ears and splayed awns, bent along a length-preserving arc in the
+   *    vertex shader.
+   *  - A ground "canopy" surface. Under the tufts it is the deep shade
+   *    between stalks; beyond CANOPY_START it rises to ear height and is
+   *    shaded as the sunlit top of the crop, so the field carries on to the
+   *    horizon instead of ending in a ring of stalks on bare soil.
+   *
    * Honest limitations (also documented in docs/GAIA133_VISUALIZATION.md):
    *  - The travelling gust/wave PATTERN (which patches bend harder, when,
-   *    and the NW->SE travel direction) is a simulated illustrative noise
-   *    field, NOT measured local wind direction or gust data.
+   *    and the NW->SE travel direction) is a simulated illustrative field,
+   *    NOT measured local wind direction or gust data.
    *  - Only the overall bend/sway INTENSITY is tied to a real telemetry
    *    value (deriveWindState().intensity, 0..1 from wind_speed_mps).
-   *  - No per-blade CPU animation: all deformation happens in a GPU vertex
-   *    shader driven by a handful of uniforms updated once per frame;
-   *    per-instance variation (height/phase/color) comes from thin-instance
-   *    buffers set up once at build time, not touched per frame.
+   *  - No per-tuft CPU animation: all motion happens in GPU shaders driven by
+   *    a handful of per-frame uniforms; per-tuft variation lives in
+   *    thin-instance buffers written once at build time.
    */
-  _buildGrass() {
+  _buildWheat() {
     const BABYLON = window.BABYLON;
     const scene = this.scene;
 
-    // Mobile/narrow canvases get a smaller density budget. Per explicit
-    // feedback from a human review of real screenshots: density without
-    // height/clumping just looked like dust/stubble, so height and
-    // clumping are prioritized over raw instance count.
     const isNarrow = (this.canvas.clientWidth || window.innerWidth || 1024) < 500;
-    // Per explicit review direction, this is now a WHEAT FIELD density
-    // model, not a meadow-tussock model: real wheat is drilled in
-    // continuous rows at hundreds of stalks per square metre, not
-    // scattered tufts on visible bare ground. The old clump/tussock
-    // scatter (a few hundred tussock centers, most ground between them
-    // empty) is replaced below with dense near-uniform placement inside
-    // NEAR_RADIUS -- blades close enough to touch/overlap -- backed by a
-    // probability falloff beyond it so the instanced field blends into
-    // the re-toned canopy-shadow ground texture (see groundTex above)
-    // rather than ending in a visible ring.
-    //
-    // NEAR_RADIUS is intentionally smaller than the old meadow version
-    // (14m vs 22m): per-blade geometry just dropped from 12 verts/10 tris
-    // to 3 verts/1 tri (an ~8-10x cheaper draw per instance), and that
-    // entire savings is spent on a much denser NEAR field rather than on
-    // pushing individual blades further toward the horizon -- the far
-    // field is the ground texture's job, not more instances (see
-    // MID_RADIUS falloff below).
-    const FIELD_RADIUS = 55;
-    const EXCLUDE_RADIUS = 2.2; // keep grass clear of the tower base/plinth
-    // Continuous exponential radial density, not a two-zone near/mid
-    // split: an explicit near-radius + falloff-band split (tried first)
-    // always produced a visible "crop circle" edge at the zone boundary
-    // no matter how smooth the band's own probability curve was, because
-    // the density on either side of that boundary was still a step
-    // function. A single smooth exp(-r/DECAY) falls continuously from
-    // full density at the turbine out toward the horizon, with a small
-    // floor so it never visually hits a hard zero, and that eliminates
-    // the seam entirely.
-    //
-    // CORRECTED per explicit review of real screenshots: DECAY=8 (~37%
-    // of peak density by 8m) collapsed almost all blades into a small
-    // disc roughly a third of the frame width, leaving a large empty
-    // expanse of bare ground texture to the horizon -- coverage AREA
-    // matters more than peak density, and this field's instanced canopy
-    // must extend out close to the FIELD_RADIUS, not just near the
-    // tower. DECAY raised ~4x so density is still over half its peak at
-    // 25m, and FLOOR raised substantially (0.05 -> 0.35) so even the far
-    // edge of the disc stays a dense, visually continuous canopy rather
-    // than fading into "mostly ground texture" territory.
-    const DENSITY_DECAY = 30; // metres: density ~37% of peak by 30m, not 8m -- extends canopy toward the horizon, not just the tower base
-    const DENSITY_FLOOR = 0.35; // far edge stays a dense canopy, not a fade into bare/ground-texture-dominated territory
-    // Order-of-magnitude density rise per review: cheap 3-vertex blades
-    // make this affordable, but it is scaled by viewport AND measured
-    // against a real FPS budget (see docs/GAIA133_VISUALIZATION.md FPS
-    // section) -- if the dense near field cannot hold frame rate on the
-    // mobile budget, the fix is to shrink the mobile RADIUS (fewer total
-    // instances via a smaller field), not to thin the near-field density
-    // that makes it read as wheat rather than lawn.
-    // Measured on this test node (see docs/GAIA133_VISUALIZATION.md FPS
-    // section): thin-instance cost here is ~0.01ms/instance with a ~24ms
-    // fixed scene overhead, and does NOT scale to "hundreds of stalks/m2"
-    // at any usable frame rate on this specific host (100k instances
-    // measured at 1.1fps; even the previous, already-approved 7000-count
-    // config only measured 9.5fps here). This budget is a deliberate,
-    // measured compromise -- see docs for the full table and the explicit
-    // call that a literal order-of-magnitude rise is not deliverable
-    // within an interactive frame budget on this host, so the visual
-    // density gain instead comes from uniform (no bare-gap) placement,
-    // wider blades, and a matching ground tone, not from raw count alone.
-    // Count raised substantially to match the extended coverage radius
-    // above (DECAY 8->30 roughly triples the effective covered radius,
-    // i.e. ~9x the covered area) -- per Andrew's explicit correction,
-    // this host's FPS measurements are software-rasterized (ANGLE/
-    // SwiftShader, no GPU) and are NOT a valid ship gate; thin-instanced
-    // single-triangle/two-triangle blades are close to free on real
-    // hardware WebGL. Density is chosen for visual coverage; the
-    // adaptive DPR/FPS caps, hidden-tab suspension, and reduced-motion
-    // behaviour remain the real safety mechanism for weak real clients
-    // (see docs/GAIA133_VISUALIZATION.md).
-    const COUNT = isNarrow ? 22000 : 48000;
+    const TUFT_COUNT = isNarrow ? 26000 : 64000;
+    const STALKS_PER_TUFT = 6;
+    const FULL_RADIUS = 45;     // full-density stand out to here (m from the tower)
+    const FIELD_RADIUS = 80;    // tufts thin out smoothly to none by here
+    const EXCLUDE_RADIUS = 2.2; // keep the stand clear of the tower base/plinth
+    const CANOPY_START = 46;    // ground rises from soil level here...
+    const CANOPY_END = 70;      // ...to ear height here, hidden by the thinning tufts
+    const CANOPY_HEIGHT = 0.82; // ripe wheat stands ~0.7-0.95 m (see tuft heights below)
 
-    // Per-blade geometry: a 4-vertex / 2-triangle QUAD (root-left,
-    // root-right, tip-left, tip-right), NOT the single 3-vertex sliver
-    // tried first. Per explicit review correction: a zero-width sliver
-    // has no AREA, so dense slivers still read as scattered straw hairs
-    // with visible gaps rather than a canopy -- "cheap geometry was the
-    // right instinct, zero width was not". A 2-tri quad is still very
-    // cheap (one more triangle than the sliver) but gives each blade
-    // real screen coverage. Local y still runs root(0) -> tip(1) so the
-    // existing quadratic bend-weight logic in the vertex shader needs no
-    // change (both edges bend together).
-    const positions = [
-      -0.09, 0, 0,  // root left
-       0.09, 0, 0,  // root right
-      -0.035, 1, 0, // tip left (slight taper, not a point)
-       0.035, 1, 0, // tip right
-    ];
-    const indices = [0, 1, 2, 2, 1, 3];
-    const uvs = [0, 0, 1, 0, 0, 1, 1, 1];
-    const bladeMesh = new BABYLON.Mesh('grassBlade', scene);
+    // mulberry32: the LCG-with-modulo used elsewhere in this file has
+    // short-period low bits, which piles tens of thousands of tufts onto a
+    // few thousand repeated spots.
+    let seed = 84211;
+    const rand = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+
+    // --- Tuft geometry, in units of the tuft's height (instance y-scale) ---
+    // Each vertex stores the ribbon CENTRE in `position` and its half-width
+    // vector in `side`, so the shader can widen distant stalks to ~1 pixel:
+    // millimetre-wide geometry otherwise aliases into sparkle at field
+    // distance, which is what made the old field read as scattered straws.
+    // uv = (part, height): part 0 stalk, 1 ear, 2 awns.
+    const positions = [];
+    const sides = [];
+    const uvs = [];
+    const indices = [];
+    const ribbon = (points) => {
+      const first = positions.length / 3;
+      for (const { c, s, part } of points) {
+        positions.push(c[0], c[1], c[2], c[0], c[1], c[2]);
+        sides.push(-s[0], -s[1], -s[2], s[0], s[1], s[2]);
+        uvs.push(part, c[1], part, c[1]);
+      }
+      for (let i = 0; i < points.length - 1; i++) {
+        const a = first + i * 2;
+        indices.push(a, a + 1, a + 2, a + 2, a + 1, a + 3);
+      }
+    };
+    const STALK_HALF_WIDTH = 0.0022;
+    // Ear outline: [fraction of ear length, half width, part]. Spindle-shaped
+    // head, then a wider, lighter fan for the awns above it.
+    const EAR_PROFILE = [[0, 0.003, 1], [0.15, 0.008, 1], [0.6, 0.0095, 1], [0.9, 0.007, 1], [1, 0.004, 1], [1.5, 0.014, 2]];
+    for (let k = 0; k < STALKS_PER_TUFT; k++) {
+      const spot = rand() * Math.PI * 2;
+      const spread = Math.sqrt(rand()) * 0.11;
+      const ox = Math.cos(spot) * spread;
+      const oz = Math.sin(spot) * spread;
+      const leanDir = rand() * Math.PI * 2;
+      const lean = 0.03 + rand() * 0.07; // static outward lean so a tuft fans open
+      const lx = Math.cos(leanDir);
+      const lz = Math.sin(leanDir);
+      const top = 0.86 + rand() * 0.14;
+      const earLength = 0.09 + rand() * 0.035;
+      const earBase = top - earLength;
+      const nod = 0.25 + rand() * 0.35; // ripe heads droop over in the lean direction
+      const at = (y, droop) => [ox + lx * (lean * y + droop), y, oz + lz * (lean * y + droop)];
+      const facing = rand() * Math.PI;
+      const fx = Math.cos(facing);
+      const fz = Math.sin(facing);
+
+      const stalk = [];
+      for (let i = 0; i <= 3; i++) {
+        stalk.push({ c: at(earBase * i / 3, 0), s: [fx * STALK_HALF_WIDTH, 0, fz * STALK_HALF_WIDTH], part: 0 });
+      }
+      ribbon(stalk);
+      // Two crossed planes give the ear volume from any viewing angle.
+      for (const [px, pz] of [[fx, fz], [-fz, fx]]) {
+        ribbon(EAR_PROFILE.map(([f, w, part]) => ({
+          c: at(earBase + f * earLength, nod * f * earLength),
+          s: [px * w, 0, pz * w],
+          part,
+        })));
+      }
+    }
+    const tuft = new BABYLON.Mesh('wheatTuft', scene);
     const vd = new BABYLON.VertexData();
     vd.positions = positions;
     vd.indices = indices;
     vd.uvs = uvs;
-    vd.applyToMesh(bladeMesh);
+    vd.applyToMesh(tuft);
+    tuft.setVerticesData('side', sides, false, 3);
 
-    // Per-instance buffers: world matrix (position/rotation/scale) plus a
-    // custom "aParams" buffer (height scale, phase offset, color tint).
-    const matrices = new Float32Array(16 * COUNT);
-    const params = new Float32Array(4 * COUNT);
-    let seed = 84211;
-    const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed % 100000) / 100000; };
-
-    // --- Placement: dense, near-UNIFORM scatter (NOT the old tussock-
-    // clump model: real drilled wheat is a continuous stand with no bare
-    // gaps between clumps). Split into two direct-sampling phases instead
-    // of one global rejection-sample loop over the whole FIELD_RADIUS
-    // disc: the earlier version sampled uniformly across the full 55m
-    // disc and only accepted hits inside the much smaller ~28m near/mid
-    // zone, wasting ~85% of the attempts budget and silently placing far
-    // fewer blades than COUNT intended (measured: ~26k of a 46k target).
-    // Sampling directly within each zone spends every attempt on an
-    // actual placement, so the requested density is the density you get. ---
-    const placeAt = (rx, rz, idx) => {
-      // Wheat character per review: TALLER AND WIDER than the old
-      // meadow-grass blades (width raised back up after an earlier pass
-      // made it narrower, which fought the "continuous canopy" goal --
-      // visual screen-coverage per blade matters more than literal stalk
-      // thinness here) and more upright at rest (the vertex shader's
-      // baseline lean is proportional to windIntensity, so "upright at
-      // calm" already falls out of that).
-      const heightScale = 1.3 + rand() * 0.55; // 1.3 - 1.85 m, taller than the old 1.1-1.8 meadow-grass range
-      const rot = rand() * Math.PI * 2;
-      const widthScale = 1.6 + rand() * 0.9; // widened further per review correction: the quad geometry change alone wasn't enough, blades must visually overlap at this density to read as canopy, not scattered stalks
-      BABYLON.Matrix.ComposeToRef(
-        new BABYLON.Vector3(widthScale, heightScale, 1),
-        BABYLON.Quaternion.RotationAxis(BABYLON.Vector3.Up(), rot),
-        new BABYLON.Vector3(rx, 0, rz),
-        tmpMatrix
-      );
-      tmpMatrix.copyToArray(matrices, idx * 16);
-      params[idx * 4 + 0] = heightScale;
-      params[idx * 4 + 1] = rand() * Math.PI * 2; // phase offset so blades don't all sway in lockstep
-      params[idx * 4 + 2] = rand(); // golden/green tint variation 0..1
-      params[idx * 4 + 3] = 0;
-    };
-
+    // --- Placement: uniform over the disc at full density out to
+    // FULL_RADIUS, then a smooth fade to nothing at FIELD_RADIUS (no visible
+    // ring, and the rising canopy surface takes over underneath). Placement
+    // order is random, so any prefix of the buffers is an even subsample. ---
+    const matrices = new Float32Array(16 * TUFT_COUNT);
+    const params = new Float32Array(4 * TUFT_COUNT);
     const tmpMatrix = BABYLON.Matrix.Identity();
+    const scale = new BABYLON.Vector3(1, 1, 1);
+    const translation = new BABYLON.Vector3(0, 0, 0);
+    const density = (r) => {
+      if (r < EXCLUDE_RADIUS) return 0;
+      if (r < FULL_RADIUS) return 1;
+      const t = Math.min(1, (r - FULL_RADIUS) / (FIELD_RADIUS - FULL_RADIUS));
+      return 1 - t * t * (3 - 2 * t);
+    };
+    // Gentle field-scale undulation in crop height, so the canopy top isn't
+    // a perfectly flat sheet.
+    const swell = (x, z) => 0.6 * Math.sin(x * 0.11 + 1.3) * Math.sin(z * 0.09 + 0.4) + 0.4 * Math.sin((x + z) * 0.23);
     let placed = 0;
-
-    // Single continuous radial density function, sampled directly rather
-    // than via global rejection over the whole FIELD_RADIUS disc (which
-    // wastes attempts in proportion to how low the average acceptance
-    // probability is -- budgeted generously below instead of guessing).
-    // Importance-sample r from an exponential-weighted distribution via
-    // inverse CDF, biasing samples toward the turbine where density
-    // should be highest, so very few attempts are wasted on far-field
-    // rejections even though far-field acceptance probability is low.
-    let attempts = 0;
-    const maxAttempts = COUNT * 40;
-    while (placed < COUNT && attempts < maxAttempts) {
-      attempts++;
-      // Inverse-CDF sample biased toward small r (exponential-ish), then
-      // clamp into the field disc; combined with the acceptProb check
-      // below this keeps the accept rate high across the whole range
-      // instead of uniformly sampling the full disc and rejecting most
-      // far-field attempts outright.
-      const u = rand();
-      const r = Math.min(FIELD_RADIUS, -DENSITY_DECAY * Math.log(1 - u * (1 - Math.exp(-FIELD_RADIUS / DENSITY_DECAY))));
-      if (r < EXCLUDE_RADIUS) continue;
-      // Correction term so the *visual* density still matches the target
-      // exp(-r/DECAY)+floor curve despite the importance-sampled r
-      // distribution already favoring small r (otherwise the floor term
-      // would be under-represented at large r). Accept with probability
-      // proportional to (floor-adjusted density) / (importance density),
-      // normalized so acceptance is always <=1.
-      const targetDensity = Math.exp(-r / DENSITY_DECAY) + DENSITY_FLOOR;
-      const acceptProb = Math.min(1, targetDensity / (1 + DENSITY_FLOOR));
-      if (rand() > acceptProb) continue;
+    for (let attempts = 0; placed < TUFT_COUNT && attempts < TUFT_COUNT * 4; attempts++) {
+      const r = FIELD_RADIUS * Math.sqrt(rand());
       const ang = rand() * Math.PI * 2;
-      placeAt(Math.cos(ang) * r, Math.sin(ang) * r, placed);
+      if (rand() >= density(r)) continue;
+      const x = Math.cos(ang) * r;
+      const z = Math.sin(ang) * r;
+      const height = 0.8 + 0.06 * swell(x, z) + rand() * 0.09; // metres to the ear tips
+      scale.set(1, height, 1);
+      translation.set(x, 0, z);
+      BABYLON.Matrix.ComposeToRef(scale, BABYLON.Quaternion.RotationAxis(BABYLON.Vector3.Up(), rand() * Math.PI * 2), translation, tmpMatrix);
+      tmpMatrix.copyToArray(matrices, placed * 16);
+      params[placed * 4 + 0] = height;
+      params[placed * 4 + 1] = rand() * Math.PI * 2;                 // sway phase
+      params[placed * 4 + 2] = rand();                               // straw/gold tint
+      params[placed * 4 + 3] = rand() < 0.12 ? 0.5 + rand() * 0.5 : 0; // a few later-ripening, greener plants
       placed++;
     }
-
-    bladeMesh.thinInstanceSetBuffer('matrix', matrices.subarray(0, placed * 16), 16, true);
-    bladeMesh.thinInstanceSetBuffer('aParams', params.subarray(0, placed * 4), 4, true);
-    this._grassCount = placed;
+    tuft.thinInstanceSetBuffer('matrix', matrices.subarray(0, placed * 16), 16, true);
+    tuft.thinInstanceSetBuffer('aParams', params.subarray(0, placed * 4), 4, true);
+    tuft.alwaysSelectAsActiveMesh = true;
+    this._wheatTuftCount = placed;
 
     // Wind travel direction: explicit ASSUMPTION authorized for this
     // illustration (wind FROM NW toward SE). In the scene's local XZ axes,
@@ -620,26 +529,23 @@ export class GaiaWind133Scene {
     // Source: "A Wave-Theoretic Model of Wind-Induced Wheat Field Motion"
     // (Academie royale de Belgique, popups.uliege.be/2593-4228/index.php?id=1986),
     // adopted per explicit direction for the illustrative gust-band look.
-    // NOT derived from real measured gust/direction data -- see docs for
-    // full provenance; only the overall amplitude/frequency SCALE below
-    // is tied to real wind_speed_mps (via windIntensity, applied in the
-    // shader, not here).
+    // NOT derived from real measured gust/direction data -- only the overall
+    // amplitude SCALE is tied to real wind_speed_mps (via windIntensity).
     //
-    // Physical parameters from the paper, mapped onto our ~1-1.5m blades:
-    //   stalk length L ~ 1m, tip mass m ~ 0.005 kg, bending stiffness
-    //   kappa = EI ~ 2e-3 N*m (E~5GPa, outer diameter 5mm, wall 0.5mm)
-    //   => natural frequency omega0 = sqrt(kappa / (m*L^2)) ~ 2 rad/s,
-    //      i.e. a ~3.1s fundamental sway period -- used directly below.
-    // Governing PDE is Klein-Gordon (d2z/dt2 = v^2*lap(z) - omega0^2*z +
-    // f/m); we do NOT implement the PDE, only its quasi-static forcing
-    // limit (z ~= f/(m*omega0^2)), i.e. a weighted sum of cosines -- cheap
-    // and shader-friendly, matching the paper's own simulation approach.
+    // Physical parameters from the paper: stalk length L ~ 1m, tip mass
+    // m ~ 0.005 kg, bending stiffness kappa = EI ~ 2e-3 N*m => natural
+    // frequency omega0 = sqrt(kappa / (m*L^2)) ~ 2 rad/s (a ~3.1s sway
+    // period). Governing PDE is Klein-Gordon; we use only its quasi-static
+    // forcing limit, a k^-2-weighted sum of travelling cosines in a narrow
+    // cone around the wind direction -- cheap, shader-friendly, and the
+    // paper's own simulation approach. Fixed phases + time-only evolution
+    // mean the bands genuinely travel across the field.
     const NUM_MODES = 7;
-    const OMEGA0 = (2 * Math.PI) / 3.1; // ~2.03 rad/s, paper's natural frequency
+    const OMEGA0 = (2 * Math.PI) / 3.1;
     const WAVE_SPEED = 1.5; // m/s illustrative transverse wave speed (not measured)
     const K_MIN = 0.63; // 1/m, wavelength ~10m
     const K_MAX = 6.28; // 1/m, wavelength ~1m
-    const baseAngle = Math.atan2(windDir.y, windDir.x); // NW->SE direction
+    const baseAngle = Math.atan2(windDir.y, windDir.x);
     const CONE_HALF_SPREAD = (15 * Math.PI) / 180; // paper's 30deg cone, halved
     let mseed = 20261025;
     const mrand = () => { mseed = (mseed * 1103515245 + 12345) & 0x7fffffff; return (mseed % 1000000) / 1000000; };
@@ -650,34 +556,49 @@ export class GaiaWind133Scene {
     const modeAmp = [];
     let ampSum = 0;
     for (let n = 0; n < NUM_MODES; n++) {
-      // Log-spaced magnitudes so both broad metre-scale swells and finer
-      // ripples are represented, not just a cluster at one scale.
-      const t = n / (NUM_MODES - 1);
-      const k = K_MIN * Math.pow(K_MAX / K_MIN, t);
+      const k = K_MIN * Math.pow(K_MAX / K_MIN, n / (NUM_MODES - 1)); // log-spaced scales
       const theta = baseAngle + (mrand() * 2 - 1) * CONE_HALF_SPREAD;
       modeKx.push(k * Math.cos(theta));
       modeKz.push(k * Math.sin(theta));
-      // Klein-Gordon dispersion: a gapped, quadratic branch -- nothing
-      // moves slower than omega0, longer waves are slower.
-      modeOmega.push(Math.sqrt(OMEGA0 * OMEGA0 + WAVE_SPEED * WAVE_SPEED * k * k));
-      // Fixed once at init, never re-randomized per frame -- time enters
-      // only through omega_n*t, giving coherent, repeatable travel.
+      modeOmega.push(Math.sqrt(OMEGA0 * OMEGA0 + WAVE_SPEED * WAVE_SPEED * k * k)); // Klein-Gordon dispersion
       modePhase.push(mrand() * Math.PI * 2);
-      // A_n proportional to k_n^-2: long wavelengths dominate, short ones
-      // are fine texture on top. This is the detail that turns uniform
-      // dust into legible travelling gust bands.
-      const amp = 1 / (k * k);
+      const amp = 1 / (k * k); // long wavelengths dominate: legible bands, fine ripple on top
       modeAmp.push(amp);
       ampSum += amp;
     }
-    // Normalize so the summed field is O(1) regardless of NUM_MODES/K
-    // range choices, before the shader applies the real windIntensity and
-    // tip-displacement scale on top.
     for (let n = 0; n < NUM_MODES; n++) modeAmp[n] /= ampSum;
 
-    BABYLON.Effect.ShadersStore['grassVertexShader'] = `
+    const GUST_GLSL = `
+      uniform float time;
+      uniform float windIntensity;
+      uniform float modeKx[7];
+      uniform float modeKz[7];
+      uniform float modeOmega[7];
+      uniform float modePhase[7];
+      uniform float modeAmp[7];
+      // 0..1 gust strength at a ground position (see the model notes in _buildWheat()).
+      float gustAt(vec2 p) {
+        float f = 0.0;
+        for (int n = 0; n < 7; n++) {
+          f += modeAmp[n] * cos(modeKx[n] * p.x + modeKz[n] * p.y - modeOmega[n] * time + modePhase[n]);
+        }
+        return clamp(0.5 + 0.8 * f, 0.0, 1.0);
+      }
+    `;
+    const FOG_GLSL = `
+      uniform vec3 fogColor;
+      uniform float fogStart;
+      uniform float fogEnd;
+      // Matches the scene's linear fog on the standard materials.
+      vec3 applyFog(vec3 color, float dist) {
+        return mix(fogColor, color, clamp((fogEnd - dist) / (fogEnd - fogStart), 0.0, 1.0));
+      }
+    `;
+
+    BABYLON.Effect.ShadersStore['wheatVertexShader'] = `
       precision highp float;
       attribute vec3 position;
+      attribute vec3 side;
       attribute vec2 uv;
       attribute vec4 world0;
       attribute vec4 world1;
@@ -686,128 +607,186 @@ export class GaiaWind133Scene {
       attribute vec4 aParams;
       uniform mat4 view;
       uniform mat4 projection;
-      uniform float time;
-      uniform float windIntensity;
       uniform vec2 windDir;
-      uniform float modeKx[7];
-      uniform float modeKz[7];
-      uniform float modeOmega[7];
-      uniform float modePhase[7];
-      uniform float modeAmp[7];
+      uniform vec3 sunDir;
+      uniform vec3 cameraPos;
+      uniform float pixelScale;
+      ${GUST_GLSL}
       varying vec2 vUv;
       varying float vTint;
-      varying float vPatch;
+      varying float vGreen;
+      varying float vGust;
+      varying float vLight;
+      varying float vDist;
       void main() {
         mat4 world = mat4(world0, world1, world2, world3);
-        float phase = aParams.y;
-        vTint = aParams.z;
-        vec3 worldRoot = (world * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-        // Illustrative travelling gust-band forcing: quasi-static limit of
-        // a Klein-Gordon stalk model (see _buildGrass() comment + docs for
-        // the paper and parameters), a k^-2-weighted sum of fixed-phase
-        // cosine modes in a narrow NW->SE cone. NOT real gust/direction
-        // data -- only the overall bend/sway INTENSITY multiplier
-        // (windIntensity) is tied to real wind_speed_mps telemetry. Fixed
-        // phases + time-only evolution means the pattern genuinely
-        // translates across the field rather than jittering stochastically.
-        float f = 0.0;
-        for (int n = 0; n < 7; n++) {
-          float kdotx = modeKx[n] * worldRoot.x + modeKz[n] * worldRoot.z;
-          f += modeAmp[n] * cos(kdotx - modeOmega[n] * time + modePhase[n]);
+        float height = aParams.x;
+        vec3 root = world[3].xyz;
+
+        // Widen distant ribbons to ~1.2 px (capped) so the stand reads as
+        // continuous coverage rather than sub-pixel sparkle.
+        float halfWidth = max(length(side), 1e-4);
+        float widen = clamp(0.6 * length(root - cameraPos) * pixelScale / halfWidth, 1.0, 60.0);
+        vec3 local = (world * vec4(position + side * widen, 1.0)).xyz - root;
+
+        // Lean angle at the ear tips: a coherent downwind lean that deepens
+        // under each passing gust, plus a slow per-tuft sway. Exactly 0 when
+        // windIntensity is 0 (calm, stale or reduced motion): upright and still.
+        float gust = gustAt(root.xz);
+        float theta = windIntensity * (0.18 + 0.75 * gust + 0.06 * sin(time * 2.1 + aParams.y));
+        // Bend along a circular arc of the stalk's own length, so heads come
+        // down as well as over instead of shearing sideways.
+        float phi = theta * local.y / height;
+        float along = 0.5 * phi * local.y;
+        float up = local.y;
+        if (theta > 1e-3) {
+          float radius = height / theta;
+          along = radius * (1.0 - cos(phi));
+          up = radius * sin(phi);
         }
-        float gust = clamp(0.5 + 0.5 * f, 0.0, 1.0);
-        vPatch = gust;
-        float bendWeight = position.y * position.y; // quadratic: mostly bends near the tip
-        // Baseline lean (not just gust-modulated) so the field reads as
-        // "bent over" at real wind speed, not "near-upright with flecks":
-        // at windIntensity=1 the tip offset is a large fraction of blade
-        // height, i.e. a pronounced lean, matching the "bent over markedly"
-        // requirement.
-        // Wheat character: STRONGER coherent lean under wind than the old
-        // meadow-grass blades (0.7 + 0.95*gust vs 0.55 + 0.75*gust), since
-        // wheat heads/stalks lean further over as a continuous sheet in
-        // real footage. At windIntensity=0 (calm) bendAmount is exactly 0
-        // -- upright at rest falls out of this directly, no separate
-        // "upright" term needed.
-        float bendAmount = windIntensity * (0.7 + 0.95 * gust) * bendWeight;
-        float microSway = windIntensity * 0.08 * sin(time * 4.2 + phase) * bendWeight;
-        // ROOT CAUSE FIX (per direct review of desktop1280 stills): the
-        // wind-bend offset was previously added to localPos BEFORE the
-        // world matrix multiply, so it was carried through the per-
-        // instance yaw rotation along with the blade's own geometry.
-        // Each blade has a random yaw (aParams-independent, baked into
-        // the instance world matrix for facing variety -- intentional
-        // and fine on its own), so that rotation silently redirected
-        // the "wind" lean to a different world-space direction for
-        // every single blade. The result was NOT a coherent lean at
-        // all -- it was hundreds of blades each leaning in their own
-        // random direction, which reads exactly like chopped straw
-        // strewn at random angles, not standing wheat bending downwind.
-        //
-        // Fix: transform the blade's own geometry (root + tip shape) by
-        // the world matrix FIRST, with no bend applied -- this keeps
-        // each blade upright/rooted exactly as placed, including its
-        // yaw-varied facing. The wind bend is then added as a SEPARATE
-        // offset in true world-space X/Z, after the per-instance
-        // rotation has already been applied, so every blade leans in
-        // the same real wind direction regardless of its random facing.
-        vec4 worldBase = world * vec4(position, 1.0);
-        vec3 worldBend = vec3(
-          windDir.x * bendAmount + microSway,
-          0.0,
-          windDir.y * bendAmount + microSway
-        );
-        vec4 worldPos = vec4(worldBase.xyz + worldBend, 1.0);
-        gl_Position = projection * view * worldPos;
+        vec3 dir = vec3(windDir.x, 0.0, windDir.y);
+        vec3 worldPos = root + vec3(local.x, 0.0, local.z) + dir * along + vec3(0.0, up, 0.0);
+
+        // Ribbon normal from the bent stalk direction and its width vector,
+        // turned to face the camera (ribbons are double-sided).
+        vec3 tangent = normalize(dir * sin(phi) + vec3(0.0, cos(phi), 0.0));
+        vec3 normal = normalize(cross(tangent, normalize(mat3(world) * side)));
+        vec3 toCamera = normalize(cameraPos - worldPos);
+        if (dot(normal, toCamera) < 0.0) normal = -normal;
+        float diffuse = max(dot(normal, sunDir), 0.0);
+        float backlight = pow(max(dot(-toCamera, sunDir), 0.0), 4.0); // translucent glow against the sun
+        vLight = 0.75 + 0.6 * diffuse + 0.35 * backlight;
+
         vUv = uv;
+        vTint = aParams.z;
+        vGreen = aParams.w;
+        vGust = gust;
+        vDist = length(worldPos - cameraPos);
+        gl_Position = projection * view * vec4(worldPos, 1.0);
       }
     `;
-    BABYLON.Effect.ShadersStore['grassFragmentShader'] = `
+    BABYLON.Effect.ShadersStore['wheatFragmentShader'] = `
       precision highp float;
+      uniform float windIntensity;
+      ${FOG_GLSL}
       varying vec2 vUv;
       varying float vTint;
-      varying float vPatch;
+      varying float vGreen;
+      varying float vGust;
+      varying float vLight;
+      varying float vDist;
       void main() {
-        // Wheat palette: GOLD family throughout (matches the re-toned
-        // ground texture's gold base), not green-gold -- per explicit
-        // review correction, a green-tinted base under a gold ground
-        // read as a colour mismatch/discoloured-blob look. Mixes a
-        // deeper shadowed gold base with a brighter straw-gold tip
-        // per-blade (vTint).
-        vec3 base = mix(vec3(0.42, 0.34, 0.09), vec3(0.68, 0.56, 0.18), vTint);
-        // Coherent lighter/darker travelling patches (vPatch, shared by the
-        // whole gust wave, not per-blade random noise) so a single still
-        // shows legible gust bands, plus a per-blade tip highlight.
-        vec3 patchShaded = base * (0.78 + 0.4 * vPatch);
-        vec3 color = mix(patchShaded, patchShaded * 1.18 + vec3(0.03, 0.04, 0.0), vUv.y);
-        gl_FragColor = vec4(color, 1.0);
+        float part = vUv.x;
+        vec3 stalk = mix(vec3(0.62, 0.52, 0.28), vec3(0.84, 0.74, 0.46), vTint);
+        vec3 ear = mix(vec3(0.76, 0.56, 0.25), vec3(0.93, 0.74, 0.4), vTint);
+        vec3 awn = vec3(0.92, 0.82, 0.56);
+        vec3 color = part < 1.0 ? mix(stalk, ear, part) : mix(ear, awn, part - 1.0);
+        color = mix(color, vec3(0.6, 0.62, 0.3), vGreen * 0.45);
+        // Self-shadowing in a dense stand: deep shade at the base, full light at the ears.
+        float ao = mix(0.32, 1.0, smoothstep(0.05, 0.85, vUv.y));
+        // Bent-over heads catch more light, so gust waves read as travelling bright bands.
+        float sheen = 1.0 + windIntensity * (vGust - 0.5) * 0.45;
+        gl_FragColor = vec4(applyFog(color * ao * vLight * sheen, vDist), 1.0);
       }
     `;
-    const grassMat = new BABYLON.ShaderMaterial('grassMat', scene, { vertex: 'grass', fragment: 'grass' }, {
-      attributes: ['position', 'uv', 'world0', 'world1', 'world2', 'world3', 'aParams'],
-      uniforms: [
-        'view', 'projection', 'time', 'windIntensity', 'windDir',
-        'modeKx', 'modeKz', 'modeOmega', 'modePhase', 'modeAmp',
-      ],
-      needAlphaBlending: false,
-    });
-    grassMat.backFaceCulling = false;
-    grassMat.setVector2('windDir', windDir);
-    grassMat.setFloat('time', 0);
-    grassMat.setFloat('windIntensity', 0);
-    // Fixed-once mode arrays for the gust-band forcing model (see comment
-    // block above): these never change after init, only `time` advances.
-    grassMat.setFloats('modeKx', modeKx);
-    grassMat.setFloats('modeKz', modeKz);
-    grassMat.setFloats('modeOmega', modeOmega);
-    grassMat.setFloats('modePhase', modePhase);
-    grassMat.setFloats('modeAmp', modeAmp);
-    bladeMesh.material = grassMat;
-    bladeMesh.alwaysSelectAsActiveMesh = true;
 
-    this.grassMesh = bladeMesh;
-    this.grassMaterial = grassMat;
-    this._grassTime = 0;
+    BABYLON.Effect.ShadersStore['wheatCanopyVertexShader'] = `
+      precision highp float;
+      attribute vec3 position;
+      uniform mat4 world;
+      uniform mat4 view;
+      uniform mat4 projection;
+      uniform float canopyStart;
+      uniform float canopyEnd;
+      uniform float canopyHeight;
+      varying vec3 vWorld;
+      varying float vRaise;
+      void main() {
+        vec3 p = (world * vec4(position, 1.0)).xyz;
+        vRaise = smoothstep(canopyStart, canopyEnd, length(p.xz));
+        p.y += canopyHeight * vRaise;
+        vWorld = p;
+        gl_Position = projection * view * vec4(p, 1.0);
+      }
+    `;
+    BABYLON.Effect.ShadersStore['wheatCanopyFragmentShader'] = `
+      precision highp float;
+      uniform vec3 cameraPos;
+      ${GUST_GLSL}
+      ${FOG_GLSL}
+      varying vec3 vWorld;
+      varying float vRaise;
+      float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+      float noise(vec2 p) {
+        vec2 i = floor(p);
+        vec2 f = fract(p);
+        vec2 u = f * f * (3.0 - 2.0 * f);
+        return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+                   mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+      }
+      void main() {
+        vec2 p = vWorld.xz;
+        float dist = length(vWorld - cameraPos);
+        // Fine mottling fades out with distance so it never shimmers.
+        float fine = 1.0 - smoothstep(30.0, 90.0, dist);
+        // Tuft-scale speckle out to mid distance, so the canopy carries the
+        // same grain as the instanced stand where the two meet.
+        float speckle = 1.0 - smoothstep(90.0, 170.0, dist);
+        float n = 0.55 + fine * 0.3 * (noise(p * 1.7) - 0.5) + speckle * 0.35 * (noise(p * 3.1) - 0.5)
+          + 0.3 * (noise(p * 0.45) - 0.5) + 0.25 * (noise(p * 0.08) - 0.5);
+        vec3 under = vec3(0.4, 0.3, 0.13) * (0.8 + 0.4 * n);                // shade between stalks
+        vec3 top = mix(vec3(0.62, 0.47, 0.21), vec3(0.84, 0.68, 0.36), n);    // sunlit crop top
+        top *= 1.0 + windIntensity * (gustAt(p) - 0.5) * 0.45;
+        gl_FragColor = vec4(applyFog(mix(under, top, vRaise), dist), 1.0);
+      }
+    `;
+
+    const sunDir = this.sun.direction.scale(-1).normalize();
+    const shared = ['view', 'projection', 'time', 'windIntensity', 'cameraPos',
+      'modeKx', 'modeKz', 'modeOmega', 'modePhase', 'modeAmp', 'fogColor', 'fogStart', 'fogEnd'];
+    const configure = (mat) => {
+      mat.setFloat('time', 0);
+      mat.setFloat('windIntensity', 0);
+      mat.setVector3('cameraPos', this.camera.position);
+      // Fixed-once mode arrays: only `time` advances after init.
+      mat.setFloats('modeKx', modeKx);
+      mat.setFloats('modeKz', modeKz);
+      mat.setFloats('modeOmega', modeOmega);
+      mat.setFloats('modePhase', modePhase);
+      mat.setFloats('modeAmp', modeAmp);
+      mat.setColor3('fogColor', scene.fogColor);
+      mat.setFloat('fogStart', scene.fogStart);
+      mat.setFloat('fogEnd', scene.fogEnd);
+      return mat;
+    };
+
+    const wheatMat = configure(new BABYLON.ShaderMaterial('wheatMat', scene, { vertex: 'wheat', fragment: 'wheat' }, {
+      attributes: ['position', 'side', 'uv', 'world0', 'world1', 'world2', 'world3', 'aParams'],
+      uniforms: [...shared, 'windDir', 'sunDir', 'pixelScale'],
+      needAlphaBlending: false,
+    }));
+    wheatMat.backFaceCulling = false;
+    wheatMat.setVector2('windDir', windDir);
+    wheatMat.setVector3('sunDir', sunDir);
+    wheatMat.setFloat('pixelScale', 0.002);
+    tuft.material = wheatMat;
+
+    const ground = BABYLON.MeshBuilder.CreateGround('ground', { width: 800, height: 800, subdivisions: 320 }, scene);
+    const canopyMat = configure(new BABYLON.ShaderMaterial('wheatCanopyMat', scene, { vertex: 'wheatCanopy', fragment: 'wheatCanopy' }, {
+      attributes: ['position'],
+      uniforms: [...shared, 'world', 'canopyStart', 'canopyEnd', 'canopyHeight'],
+    }));
+    canopyMat.setFloat('canopyStart', CANOPY_START);
+    canopyMat.setFloat('canopyEnd', CANOPY_END);
+    canopyMat.setFloat('canopyHeight', CANOPY_HEIGHT);
+    ground.material = canopyMat;
+
+    this.wheatMesh = tuft;
+    this.wheatMaterials = [wheatMat, canopyMat];
+    this._wheatMaterial = wheatMat;
+    this._wheatTime = 0;
+    this._wheatFrames = 0;
+    this._wheatFrameEma = 1 / MAX_FPS;
   }
 
   _buildLabels() {
@@ -1087,16 +1066,32 @@ export class GaiaWind133Scene {
       this.rotorPivot.rotation.z = this._rotorAngle;
     }
 
-    if (this.grassMaterial) {
+    if (this.wheatMaterials) {
       // Reduced motion, or wind telemetry stale/disconnected/invalid: freeze
-      // the grass entirely (don't advance time, force intensity to 0) so a
+      // the wheat entirely (don't advance time, force intensity to 0) so a
       // frozen scene never silently keeps "breathing" with stale data.
-      const grassShouldAnimate = !this.reducedMotion && windState.active;
-      if (grassShouldAnimate) {
-        this._grassTime += dtSec;
+      const wheatShouldAnimate = !this.reducedMotion && windState.active;
+      if (wheatShouldAnimate) {
+        this._wheatTime += dtSec;
       }
-      this.grassMaterial.setFloat('time', this._grassTime);
-      this.grassMaterial.setFloat('windIntensity', grassShouldAnimate ? windState.intensity : 0);
+      for (const mat of this.wheatMaterials) {
+        mat.setFloat('time', this._wheatTime);
+        mat.setFloat('windIntensity', wheatShouldAnimate ? windState.intensity : 0);
+        mat.setVector3('cameraPos', this.camera.position);
+      }
+      // World size of one pixel per metre of distance, for widening far stalks.
+      this._wheatMaterial.setFloat('pixelScale', 2 * Math.tan(this.camera.fov / 2) / this.engine.getRenderHeight());
+
+      // Weak GPUs: if frames persistently can't keep up with MAX_FPS, shed
+      // half the tufts (down to a quarter). Placement order is random, so the
+      // remaining prefix of the instance buffers is still an even field.
+      this._wheatFrameEma = this._wheatFrameEma * 0.95 + Math.min(dtSec, 0.25) * 0.05;
+      this._wheatFrames++;
+      if (this._wheatFrames > 90 && this._wheatFrameEma > 1.6 / MAX_FPS
+          && this.wheatMesh.thinInstanceCount > this._wheatTuftCount / 4) {
+        this.wheatMesh.thinInstanceCount = Math.floor(this.wheatMesh.thinInstanceCount / 2);
+        this._wheatFrames = 0;
+      }
     }
 
     this.scene.render();
