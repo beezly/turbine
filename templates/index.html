@@ -116,12 +116,6 @@
         .turbine-icon svg {
             width: 100%;
             height: 100%;
-            animation: spin 8s linear infinite;
-        }
-
-        @keyframes spin {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
         }
 
         .brand h1 {
@@ -466,6 +460,104 @@
         }
 
         /* Metrics grid */
+        .viz-card {
+            grid-column: 1 / -1;
+        }
+
+        .viz-state-badge {
+            font-size: 0.8rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            padding: 2px 10px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.15);
+            color: var(--text-secondary, #cad1db);
+        }
+
+        .viz-stage {
+            position: relative;
+            width: 100%;
+            /* Desktop stage height raised 320->520px: a 1150px-wide x 320px
+               stage geometrically forced the turbine to read as a thin
+               horizontal sliver regardless of camera framing (confirmed via
+               bbox QA + a human review of actual screenshots). The fix is
+               stage proportions, not the camera solver. */
+            height: 520px;
+            border-radius: 12px;
+            overflow: hidden;
+            background: linear-gradient(180deg, #16324a 0%, #0b1a26 100%);
+        }
+
+        .turbine-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+            touch-action: none;
+        }
+
+        .turbine-canvas[hidden] {
+            display: none;
+        }
+
+        /* Fallback and the live canvas are mutually exclusive. The class rule
+           below sets display:flex unconditionally, which (being an author
+           rule) otherwise beats the UA [hidden] default -- this explicit
+           override is what actually makes `fallback.hidden = true` hide it
+           once Babylon.js initializes successfully. */
+        .turbine-viz-fallback {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            text-align: center;
+            padding: 16px;
+            color: var(--text-secondary, #cad1db);
+            font-size: 0.85rem;
+        }
+
+        .turbine-viz-fallback[hidden] {
+            display: none;
+        }
+
+        .viz-illustration-note {
+            position: absolute;
+            left: 8px;
+            bottom: 6px;
+            font-size: 0.68rem;
+            line-height: 1.2;
+            color: rgba(226, 232, 240, 0.8);
+            background: rgba(15, 23, 42, 0.5);
+            padding: 2px 7px;
+            border-radius: 6px;
+            pointer-events: none;
+            max-width: calc(100% - 16px);
+        }
+
+        @media (max-width: 640px) {
+            .viz-stage {
+                /* Taller relative to width on phones so the rotor (which is
+                   wider than it is tall once both blades are extended) is
+                   not squeezed by a short stage; the on-canvas label sits in
+                   a fixed-height strip below the model, not over it. */
+                height: 260px;
+            }
+
+            .viz-illustration-note {
+                font-size: 0.62rem;
+                left: 6px;
+                bottom: 4px;
+            }
+        }
+
+        @media (max-width: 400px) {
+            .viz-stage {
+                height: 230px;
+            }
+        }
+
         .metrics-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -1027,10 +1119,10 @@
             <div class="brand">
                 <div class="turbine-icon">
                     <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <circle cx="50" cy="50" r="8" fill="#38bdf8"/>
-                        <path d="M50 42 L50 8 L58 20 L50 18 L42 20 Z" fill="#38bdf8" opacity="0.9"/>
-                        <path d="M56.93 46 L83.3 27.5 L78 42 L72 38 L75 48 Z" fill="#38bdf8" opacity="0.9" transform="rotate(120 50 50)"/>
-                        <path d="M56.93 46 L83.3 27.5 L78 42 L72 38 L75 48 Z" fill="#38bdf8" opacity="0.9" transform="rotate(240 50 50)"/>
+                        <circle cx="50" cy="38" r="5" fill="#38bdf8"/>
+                        <rect x="47" y="40" width="6" height="52" rx="2" fill="#38bdf8" opacity="0.9"/>
+                        <path d="M50 38 L24 18 L34 34 Z" fill="#38bdf8" opacity="0.9"/>
+                        <path d="M50 38 L76 58 L66 42 Z" fill="#38bdf8" opacity="0.9"/>
                     </svg>
                 </div>
                 <h1>Turbine Control</h1>
@@ -1062,6 +1154,29 @@
         </header>
 
         <main class="dashboard" id="dashboard">
+            <!-- Gaia-Wind 133 3D visualization: illustrative, driven by live telemetry
+                 below (rotor_rpm/wind_speed_mps/status). Not a camera feed. -->
+            <div class="card viz-card" id="vizCard">
+                <div class="card-header">
+                    <span class="card-title">Gaia-Wind 133 &mdash; Rotor Visualization</span>
+                    <span id="vizStateBadge" class="viz-state-badge" aria-live="polite">--</span>
+                </div>
+                <div class="viz-stage">
+                    <canvas id="turbineCanvas" class="turbine-canvas" aria-label="3D illustration of the Gaia-Wind 133 turbine reflecting live rotor speed" hidden></canvas>
+                    <div id="turbineVizFallback" class="turbine-viz-fallback">
+                        <svg viewBox="0 0 100 100" width="72" height="72" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <rect x="47" y="30" width="6" height="60" rx="2" fill="#94a3b8"/>
+                            <circle cx="50" cy="28" r="5" fill="#94a3b8"/>
+                            <path d="M50 28 L20 6 L32 24 Z" fill="#94a3b8"/>
+                            <path d="M50 28 L80 50 L68 32 Z" fill="#94a3b8"/>
+                        </svg>
+                        <p>3D visualization unavailable in this browser (WebGL disabled or failed to load).<br>
+                           Live numeric telemetry below is unaffected.</p>
+                    </div>
+                    <div class="viz-illustration-note">3D illustration &mdash; not a live camera. Orientation/yaw approximate.</div>
+                </div>
+            </div>
+
             <!-- Hero wind speed -->
             <div class="hero-metric">
                 <span class="hero-label">Wind Speed</span>
@@ -1755,6 +1870,144 @@
                 }
             }
         });
+    </script>
+
+    <!-- Gaia-Wind 133 3D visualization: vendored Babylon.js (pinned 7.54.3,
+         static local file, no CDN), lazy-loaded only after the page is
+         interactive. See docs/GAIA133_VISUALIZATION.md for size/perf notes. -->
+    <script type="module">
+        (function () {
+            const canvas = document.getElementById('turbineCanvas');
+            const fallback = document.getElementById('turbineVizFallback');
+            const badge = document.getElementById('vizStateBadge');
+            if (!canvas || !fallback) return;
+
+            // QA/dev-only deterministic no-WebGL hook: ?forceNoWebGL=1 makes
+            // getContext('webgl'|'webgl2'|'experimental-webgl') return null on
+            // this canvas before Babylon.js ever loads, so the fallback path
+            // can be screenshot-verified instead of relying on a browser flag
+            // (--disable-webgl is not reliable across Chromium builds). This
+            // only affects this one canvas and only when the query param is
+            // present; it has no effect on normal production use.
+            if (new URLSearchParams(window.location.search).get('forceNoWebGL') === '1') {
+                const nativeGetContext = canvas.getContext.bind(canvas);
+                canvas.getContext = function (type, attrs) {
+                    if (typeof type === 'string' && /webgl/i.test(type)) return null;
+                    return nativeGetContext(type, attrs);
+                };
+            }
+
+            let vizInstance = null;
+            let vizModulePromise = null;
+
+            function setBadge(label) {
+                if (badge) badge.textContent = label;
+            }
+
+            function ensureLoaded() {
+                if (vizModulePromise) return vizModulePromise;
+                vizModulePromise = (async () => {
+                    try {
+                        if (!window.BABYLON) {
+                            await new Promise((resolve, reject) => {
+                                const s = document.createElement('script');
+                                s.src = '/static/vendor/babylonjs/babylon.min.js';
+                                s.onload = resolve;
+                                s.onerror = reject;
+                                document.head.appendChild(s);
+                            });
+                        }
+                        const mod = await import('/static/js/turbine-scene.js');
+                        vizInstance = mod.initTurbineViz(canvas, fallback);
+                        if (!vizInstance) {
+                            setBadge('UNAVAILABLE');
+                            if (new URLSearchParams(window.location.search).get('qaBboxProbe') === '1') {
+                                document.title = 'QA_INIT_NULL hasBabylon=' + !!window.BABYLON + ' isSupported=' + (window.BABYLON ? String(window.BABYLON.Engine.isSupported()) : 'n/a');
+                            }
+                        }
+
+                        // QA/dev-only: ?qaBboxProbe=1 logs the camera-fit bounding
+                        // box projection to the console repeatedly, so framing can
+                        // be verified numerically from headless Chromium console
+                        // output instead of eyeballing screenshots. No effect
+                        // without the query param; does not touch production.
+                        if (vizInstance && new URLSearchParams(window.location.search).get('qaBboxProbe') === '1' && vizInstance.getProjectedBoundsForQA) {
+                            // Run immediately (camera fit is computed synchronously in the
+                            // constructor) AND again after a short delay/on next frame, so this
+                            // works whether or not the headless runner's virtual time advances
+                            // real setTimeout callbacks.
+                            const writeProbe = () => {
+                                // Force a fresh resize/fit immediately before reading, in case
+                                // the canvas's real CSS layout size wasn't settled yet when the
+                                // engine was first constructed (observed: default 300x150
+                                // fallback size on some headless runs).
+                                if (vizInstance.engine) vizInstance.engine.resize();
+                                if (vizInstance._fitCameraToAspect) vizInstance._fitCameraToAspect();
+                                const result = JSON.stringify(vizInstance.getProjectedBoundsForQA());
+                                console.log('QA_BBOX_RESULT', result);
+                                document.title = 'QA_BBOX_RESULT ' + result;
+                            };
+                            writeProbe();
+                            requestAnimationFrame(writeProbe);
+                            setTimeout(writeProbe, 600);
+                            setTimeout(writeProbe, 1500);
+                            setTimeout(writeProbe, 3000);
+                        }
+                    } catch (err) {
+                        console.error('Failed to load Gaia-Wind 133 visualization:', err);
+                        fallback.hidden = false;
+                        canvas.hidden = true;
+                        setBadge('UNAVAILABLE');
+                        if (new URLSearchParams(window.location.search).get('qaBboxProbe') === '1') {
+                            document.title = 'QA_INIT_ERROR ' + (err && err.stack ? err.stack : String(err));
+                        }
+                    }
+                })();
+                return vizModulePromise;
+            }
+
+            // Lazy: only build the WebGL scene once the viz card is actually visible.
+            if ('IntersectionObserver' in window) {
+                // rootMargin loads the scene proactively (before the card is
+                // literally in view) rather than only once scrolled fully into
+                // the viewport on narrow/short screens -- on some narrow mobile
+                // layouts the card can sit far enough down that a strict
+                // threshold-only observer never fires during a quick visit.
+                const io = new IntersectionObserver((entries) => {
+                    for (const entry of entries) {
+                        if (entry.isIntersecting) {
+                            ensureLoaded();
+                            io.disconnect();
+                        }
+                    }
+                }, { threshold: 0, rootMargin: '600px 0px' });
+                const card = document.getElementById('vizCard');
+                if (card) io.observe(card);
+                else ensureLoaded();
+            } else {
+                ensureLoaded();
+            }
+
+            // Feed the same 'status'/'data' socket.io events the rest of the
+            // dashboard already uses (added listeners; existing handlers above
+            // are untouched). No separate MQTT/socket connection is created.
+            if (typeof socket !== 'undefined') {
+                socket.on('status', function (data) {
+                    if (vizInstance) vizInstance.updateStatus(data);
+                    if (badge && vizInstance) {
+                        const label = vizInstance.lastState ? vizInstance.lastState.label : (data.connected ? 'STOPPED' : 'NO DATA');
+                        setBadge(label);
+                    }
+                });
+                socket.on('data', function (data) {
+                    if (vizInstance) vizInstance.updateData(data);
+                });
+            }
+
+            window.addEventListener('beforeunload', function () {
+                if (vizInstance) vizInstance.dispose();
+            });
+        })();
     </script>
 </body>
 </html>

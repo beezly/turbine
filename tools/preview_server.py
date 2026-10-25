@@ -28,12 +28,15 @@ from flask import Flask, jsonify, make_response, render_template, request, abort
 from flask_socketio import SocketIO, emit
 
 TEMPLATES = Path(__file__).resolve().parent.parent / 'templates'
+STATIC = Path(__file__).resolve().parent.parent / 'static'
 HOST = '127.0.0.1'
 REFRESH_SECONDS = 1.0
 DISCONNECT_AFTER_SECONDS = 4.0
 
 SCENARIOS = {
     'live': 'Fresh data every second, non-zero values: should read "Live".',
+    'calm': 'QA fixture: fixed near-zero wind (0.2 m/s), rotor stopped -- for calm-vs-high-wind comparison at an identical camera.',
+    'windy': 'QA fixture: fixed high wind (18 m/s), rotor spinning fast -- for calm-vs-high-wind comparison at an identical camera.',
     'zero': 'Fresh data where wind, power, RPM, voltages and runtimes are genuinely 0: must show 0, not "--".',
     'missing': 'Fresh data but some fields are null: those show "--", the rest show values.',
     'waiting': 'Server up, controller status known, no turbine data published yet: "Waiting for data…".',
@@ -49,7 +52,7 @@ def _iso(dt):
     return dt.isoformat()
 
 
-def _data(now, *, zero=False, missing=False):
+def _data(now, *, zero=False, missing=False, fixed=None):
     """A data payload shaped like TurbineMonitor._collect_turbine_data()."""
     t = now.timestamp()
     wave = lambda period, lo, hi: lo + (hi - lo) * (0.5 + 0.5 * math.sin(2 * math.pi * t / period))
@@ -82,6 +85,18 @@ def _data(now, *, zero=False, missing=False):
             data[key] = None
         data['controller_time'] = None
         data['status_message'] = ''
+    # `fixed`: QA-only override for a genuinely STABLE (non-randomized)
+    # wind_speed_mps/rotor_rpm/generator_rpm/power_W reading, so a
+    # calm-vs-high-wind screenshot pair at an identical camera reflects a
+    # real steady telemetry state rather than racing the live sine-wave
+    # randomizer. Only used by the 'calm'/'windy' QA fixtures below.
+    if fixed is not None:
+        wind_v, rotor_v, gen_v, power_v = fixed
+        data['wind_speed_mps'] = wind_v
+        data['rotor_rpm'] = rotor_v
+        data['generator_rpm'] = gen_v
+        data['power_W'] = power_v
+        data['power_W_10min'] = power_v
     return data
 
 
@@ -97,6 +112,10 @@ def build_fixture(name, now=None):
 
     if name in ('live', 'disconnected'):
         return status(True, now), _data(now)
+    if name == 'calm':
+        return status(True, now), _data(now, fixed=(0.2, 0, 0, 0))
+    if name == 'windy':
+        return status(True, now), _data(now, fixed=(18.0, 26.0, 1550.0, 11000.0))
     if name == 'zero':
         return status(True, now), _data(now, zero=True)
     if name == 'missing':
@@ -127,7 +146,7 @@ def _alarms(now):
 
 
 def create_app():
-    app = Flask(__name__, template_folder=str(TEMPLATES))
+    app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
     socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=[])
     active = {}              # sid -> scenario, for the refresh loops
     disconnected_seen = {'n': 0}   # 'disconnected' scenario: refuse reconnects after the first drop
@@ -183,7 +202,13 @@ def create_app():
             if active.get(sid) != name:
                 return
             status, data = build_fixture(name)
-            if name in ('live', 'zero', 'missing'):
+            # 'calm'/'windy' are QA fixtures with fixed (non-randomized)
+            # data, but still need periodic re-emission: the page's
+            # Babylon viz handler is registered asynchronously (after a
+            # dynamic import resolves) and can miss the single 'data'
+            # event sent on connect, in which case it never receives
+            # telemetry at all without a follow-up emit.
+            if name in ('live', 'zero', 'missing', 'calm', 'windy'):
                 socketio.emit('data', data, to=sid)
             # stale / turbine_down re-send status only, as the real monitor does while it retries
             socketio.emit('status', status, to=sid)
