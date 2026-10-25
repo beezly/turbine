@@ -98,7 +98,9 @@ class TestMqttEntrypoint:
 
 class TestSocketEntrypoint:
     def test_socket_command_funnels_through_same_dispatcher(self, monitor):
-        monitor._handle_socket_command('START')
+        # Authenticated dict shape (matching the HTTP/MQTT password gate)
+        # is required; this is what actually reaches the dispatcher.
+        monitor._handle_socket_command({'command': 'START', 'password': 'pw'})
         recs = list(monitor.command_dispatcher._records.values())
         assert len(recs) == 1
         assert recs[0].request.source == 'socket'
@@ -106,9 +108,34 @@ class TestSocketEntrypoint:
         monitor._dispatcher_execute.assert_called_once()
 
     def test_socket_unknown_command_emits_error_result(self, monitor):
-        monitor._handle_socket_command('bogus')
+        monitor._handle_socket_command({'command': 'bogus', 'password': 'pw'})
         monitor.socketio.emit.assert_any_call(
             'command_result', {'command': 'bogus', 'ok': False, 'error': "unknown command: 'bogus'"})
+
+    def test_socket_bare_string_is_rejected_unauthenticated(self, monitor):
+        # Legacy bare-string shape (no password) must never reach the
+        # dispatcher, regardless of command name.
+        monitor._handle_socket_command('START')
+        recs = list(monitor.command_dispatcher._records.values())
+        assert len(recs) == 0
+        monitor._dispatcher_execute.assert_not_called()
+        monitor.socketio.emit.assert_any_call(
+            'command_result', {'command': 'START', 'ok': False,
+                                'error': 'unauthorized: password required'})
+
+    def test_socket_dict_without_password_is_rejected(self, monitor):
+        monitor._handle_socket_command({'command': 'start'})
+        recs = list(monitor.command_dispatcher._records.values())
+        assert len(recs) == 0
+        monitor.socketio.emit.assert_any_call(
+            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
+
+    def test_socket_dict_with_wrong_password_is_rejected(self, monitor):
+        monitor._handle_socket_command({'command': 'start', 'password': 'nope'})
+        recs = list(monitor.command_dispatcher._records.values())
+        assert len(recs) == 0
+        monitor.socketio.emit.assert_any_call(
+            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
 
 
 class TestHttpEntrypoint:
@@ -173,7 +200,7 @@ class TestConcurrentInterfaces:
 
         def do_socket():
             try:
-                monitor._handle_socket_command('stop')
+                monitor._handle_socket_command({'command': 'stop', 'password': 'pw'})
             except Exception as e:
                 errors.append(e)
 

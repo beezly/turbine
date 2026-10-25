@@ -7,6 +7,7 @@ Monitors wind turbine data via Mnet protocol and publishes to MQTT.
 
 import json
 import logging
+import secrets
 import struct
 import time
 import threading
@@ -323,7 +324,7 @@ class TurbineMonitor:
             supplied = request.headers.get('X-Control-Password')
             if supplied is None and request.is_json:
                 supplied = (request.get_json(silent=True) or {}).get('password')
-            if supplied != self.control_password:
+            if not isinstance(supplied, str) or not secrets.compare_digest(supplied, self.control_password):
                 return jsonify({'error': 'unauthorized (bad or missing control password)'}), 401
             if name not in self.COMMAND_MAP:
                 return jsonify({'error': 'unknown command: %s' % name,
@@ -522,34 +523,62 @@ class TurbineMonitor:
             self.logger.error(f"Error handling command: {e}")
             self.logger.error(traceback.format_exc())
 
+    def _emit_to_requester(self, event: str, payload: dict):
+        """Emit to only the client that made the current Socket.IO request,
+        instead of broadcasting to every connected socket. Falls back to a
+        broadcast only when there is no active request context (e.g. a
+        direct unit-test call), which matches existing test expectations.
+        Rejection/error payloads passed here must never contain the control
+        password."""
+        sid = None
+        try:
+            sid = getattr(request, 'sid', None)
+        except Exception:
+            sid = None
+        if sid:
+            self.socketio.emit(event, payload, to=sid)
+        else:
+            self.socketio.emit(event, payload)
+
     def _handle_socket_command(self, command):
         """Handle incoming socket command from web UI: funnels through the
         same dispatcher as MQTT/HTTP.
 
-        Accepts a bare string (legacy UI, unauthenticated) or a dict
-        {"command": ..., "password": ..., ["request_id"], ["ttl"]}. A dict is
-        checked against the control password like the HTTP endpoint. The
-        password is never logged or echoed."""
+        Requires a dict {"command": ..., "password": ..., ["request_id"],
+        ["ttl"]} checked against the control password, constant-time, like
+        the HTTP endpoint. Bare strings (the legacy unauthenticated UI
+        shape) are always rejected and never reach the dispatcher. The
+        password is never logged or echoed, and error replies are sent only
+        to the requesting client (never broadcast) so they can never carry a
+        secret to other connected sockets."""
         try:
             if isinstance(command, dict):
                 raw_name = command.get('command')
                 name = raw_name.strip().lower() if isinstance(raw_name, str) else ''
                 supplied = command.get('password')
-                if not self.control_password or supplied != self.control_password:
+                authorized = (
+                    isinstance(supplied, str)
+                    and bool(self.control_password)
+                    and secrets.compare_digest(supplied, self.control_password)
+                )
+                if not authorized:
                     self.logger.warning("Socket command '%s' rejected: unauthorized", name)
-                    self.socketio.emit('command_result', {'command': name, 'ok': False,
-                                                          'error': 'unauthorized'})
+                    self._emit_to_requester('command_result', {'command': name, 'ok': False,
+                                                                 'error': 'unauthorized'})
                     return
                 envelope = {'name': name, 'request_id': command.get('request_id'),
                             'ttl': command.get('ttl')}
             elif isinstance(command, str):
-                self.logger.warning("Socket command received without a password "
-                                    "(legacy bare-string path is unauthenticated)")
-                envelope = parse_envelope(command)
-                name = envelope['name']
+                # Legacy bare-string shape carries no credential; it must
+                # never be queued for execution, regardless of command name.
+                self.logger.warning("Socket command rejected: bare-string "
+                                    "(unauthenticated) commands are no longer accepted")
+                self._emit_to_requester('command_result', {'command': command, 'ok': False,
+                                                             'error': 'unauthorized: password required'})
+                return
             else:
-                self.socketio.emit('command_result', {'command': '', 'ok': False,
-                                                      'error': 'invalid command payload'})
+                self._emit_to_requester('command_result', {'command': '', 'ok': False,
+                                                             'error': 'invalid command payload'})
                 return
             self.logger.info(f"Received socket command: {name}")
             try:

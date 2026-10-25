@@ -615,22 +615,30 @@ class TestSocketAuthAndLegacy:
             'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
         assert not monitor.command_dispatcher._records
 
-    def test_bare_string_still_accepted_with_warning(self, monitor):
+    def test_bare_string_now_rejected_unauthenticated(self, monitor):
+        # Closes the previous bypass: the web UI/legacy clients can no
+        # longer get a bare, unauthenticated command string executed just
+        # because the dict/password path exists alongside it.
         monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
         monitor._handle_socket_command('START')
-        rec = only_record(monitor)
-        assert rec.request.source == 'socket'
-        wait_terminal(monitor, rec.request.id)
+        assert not monitor.command_dispatcher._records
+        monitor.command_dispatcher._executor.assert_not_called()
         assert monitor.logger.warning.called
         assert 'unauthenticated' in repr(monitor.logger.warning.call_args_list)
+        monitor.socketio.emit.assert_any_call(
+            'command_result', {'command': 'START', 'ok': False,
+                                'error': 'unauthorized: password required'})
 
     def test_legacy_socket_result_shapes(self, monitor):
+        # MQTT keeps its unauthenticated plain-text legacy shape (tested
+        # separately below); the socket/web path now always requires the
+        # dict {"command", "password"} shape to reach the dispatcher.
         monitor.command_dispatcher._executor = Mock(return_value={'ok': True, 'reply': 'ab'})
-        monitor._handle_socket_command('start')
+        monitor._handle_socket_command({'command': 'start', 'password': SECRET})
         wait_terminal(monitor, only_record(monitor).request.id)
         monitor.socketio.emit.assert_any_call('command_result',
                                               {'command': 'start', 'ok': True, 'reply': 'ab'})
-        monitor._handle_socket_command('bogus')
+        monitor._handle_socket_command({'command': 'bogus', 'password': SECRET})
         calls = [c for c in monitor.socketio.emit.call_args_list
                  if c.args[1].get('command') == 'bogus']
         assert len(calls) == 1  # exactly one rejection event, not duplicated
@@ -701,3 +709,89 @@ class TestMqttAndHttpLegacy:
             blob += repr(rec.to_result_dict()) + repr(rec.result)
         assert SECRET not in blob
         assert WRONG not in blob
+
+
+
+class TestSocketRealTransportTargeting:
+    """Real flask_socketio test clients (no mocked SocketIO), proving the
+    unauthorized/invalid-payload reply goes only to the requesting
+    connection and is never broadcast to an unrelated bystander socket.
+    No hardware, no broker, no real network: flask_socketio's in-process
+    test client."""
+
+    @pytest.fixture
+    def real_monitor(self):
+        import turbine_monitor as tm
+        with patch.object(tm.TurbineMonitor, '_create_device', return_value=Mock()), \
+             patch.object(tm.mnet, 'Mnet') as mnet_cls, \
+             patch.object(tm.TurbineMonitor, '_setup_mqtt', return_value=Mock()), \
+             patch.object(tm.TurbineMonitor, '_setup_command_subscription'):
+            mnet_cls.return_value.get_serial_number.return_value = (1234, b'\x00\x00\x04\xd2')
+            mon = tm.TurbineMonitor('tcp://localhost:1', 'broker.invalid', control_password=SECRET)
+        mon.mqtt_client = Mock()
+        mon._dispatcher_execute = Mock(return_value={'ok': True, 'reply': 'ab'})
+        mon.command_dispatcher._executor = mon._dispatcher_execute
+        yield mon
+        mon.command_dispatcher.stop(timeout=2)
+
+    def _received(self, client):
+        return [m for m in client.get_received() if m['name'] == 'command_result']
+
+    def test_unauthorized_reply_not_broadcast_to_bystander(self, real_monitor):
+        bystander = real_monitor.socketio.test_client(real_monitor.app)
+        actor = real_monitor.socketio.test_client(real_monitor.app)
+        try:
+            bystander.get_received()  # drain connect-time emits
+            actor.get_received()
+
+            actor.emit('command', {'command': 'start', 'password': WRONG})
+
+            actor_results = self._received(actor)
+            bystander_results = self._received(bystander)
+
+            assert len(actor_results) == 1
+            assert actor_results[0]['args'][0] == {
+                'command': 'start', 'ok': False, 'error': 'unauthorized'}
+            # The rejection must reach only the requester, never the
+            # bystander connection.
+            assert bystander_results == []
+            assert not real_monitor.command_dispatcher._records
+        finally:
+            actor.disconnect()
+            bystander.disconnect()
+
+    def test_bare_string_reply_not_broadcast_to_bystander(self, real_monitor):
+        bystander = real_monitor.socketio.test_client(real_monitor.app)
+        actor = real_monitor.socketio.test_client(real_monitor.app)
+        try:
+            bystander.get_received()
+            actor.get_received()
+
+            actor.emit('command', 'start')  # legacy bare-string, no password
+
+            actor_results = self._received(actor)
+            bystander_results = self._received(bystander)
+
+            assert len(actor_results) == 1
+            assert actor_results[0]['args'][0]['ok'] is False
+            assert bystander_results == []
+            assert not real_monitor.command_dispatcher._records
+            real_monitor._dispatcher_execute.assert_not_called()
+        finally:
+            actor.disconnect()
+            bystander.disconnect()
+
+    def test_authenticated_command_still_executes_over_real_transport(self, real_monitor):
+        actor = real_monitor.socketio.test_client(real_monitor.app)
+        try:
+            actor.get_received()
+            actor.emit('command', {'command': 'start', 'password': SECRET})
+            deadline = time.time() + 2.0
+            results = []
+            while time.time() < deadline and not results:
+                time.sleep(0.02)
+                results = self._received(actor)
+            assert results and results[0]['args'][0]['ok'] is True
+            assert SECRET not in repr(results)
+        finally:
+            actor.disconnect()

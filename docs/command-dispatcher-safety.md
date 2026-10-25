@@ -212,22 +212,103 @@ policy.
 
 ## 4. Web (HTTP/Socket.IO) auth boundary
 
-Unchanged in this pass: `TURBINE_CONTROL_PASSWORD`-gated
-`/api/command/<name>` (header or JSON body password), same as before. This
-branch does not introduce, remove, or bypass that check — it only moved
-*what happens after* the check passes (dispatcher submission instead of a
-raw shared field). No new unauthenticated path was added. A deliberate
-future web-auth migration (e.g. session/CSRF hardening) is out of scope
-here and was not silently assumed "already protected" anywhere in this
-change.
+### 4a. Follow-up revision (closes the Socket.IO bare-string bypass)
 
-### Known remaining security gap
+The previous revision of this branch (see "Known remaining security gap"
+below, kept for the historical record) left an actual, exploitable
+unauthenticated path: the Socket.IO `command` handler accepted a bare
+string from any connected client and queued it for execution with only a
+log warning, while the *served* `templates/index.html` still only ever
+sent that bare-string shape. In practice that meant **every web client
+connected to the Socket.IO endpoint could execute start/stop/reset/etc.
+with no control password at all**, regardless of whether
+`TURBINE_CONTROL_PASSWORD` was configured. This follow-up closes that gap:
 
-WebSocket control-command auth is **not** fully unified with the HTTP
-password gate. Legacy bare-string Socket.IO callers (the current WebUI) are
-still accepted without a password; only the new dict form with `password` is
-checked. This is a disclosed limitation. Closing it needs a session/auth
-migration decision that is out of scope for this change.
+- `_handle_socket_command` now **rejects every bare string outright** and
+  never calls `self.command_dispatcher.submit(...)` for it. The dict shape
+  `{"command", "password", ["request_id"], ["ttl"]}` is the only path that
+  can reach the dispatcher, same contract as before, just actually
+  enforced now.
+- The dict-shape password comparison (both Socket.IO and the pre-existing
+  `/api/command/<name>` HTTP header/body check) now uses
+  `secrets.compare_digest` instead of `!=`, closing the previously
+  disclosed non-constant-time-comparison gap for both paths.
+- Rejection/error replies (`command_result` for unauthorized or
+  invalid-payload cases) are now sent only to the requesting Socket.IO
+  client (`socketio.emit(..., to=request.sid)`), not broadcast to every
+  connected socket, verified with a real (non-mocked) `flask_socketio`
+  test-client pair in `tests/test_command_dispatcher_safety.py::TestSocketRealTransportTargeting`.
+  Successful `command_result` events for genuinely queued/executed
+  commands keep the existing broadcast behavior (unchanged shape/contract,
+  consistent with prior MQTT/HTTP-triggered broadcasts that all connected
+  dashboards already relied on to reflect turbine state).
+- `templates/index.html`'s `sendCommand()` now prompts for the control
+  password (`window.prompt`) and always sends the dict shape; it never
+  sends a bare string. Cancelling the prompt (`null`) or submitting it
+  empty sends nothing. The password is not persisted (no `localStorage`,
+  no logging) — it exists only for the duration of building that one
+  `socket.emit(...)` call. This is new, deliberate web-UI behavior; it was
+  not silently left as the old unauthenticated UX.
+- **MQTT is explicitly unchanged**: `_handle_command_message` (the
+  `turbine/<serial>/command` plain-text legacy path) was not touched by
+  this follow-up, verified by `TestMqttAndHttpLegacy` continuing to pass
+  unmodified. It remains unauthenticated at the application layer by
+  design/legacy contract; broker-level trust/ACL is the control boundary
+  there (see Section 3), and that boundary was not touched or re-verified
+  in this pass.
+- **Browser/UI QA**: a finite, offline, no-browser-required harness
+  (`tests/frontend_qa_sendcommand.js`, run with plain `node`) extracts
+  `sendCommand()`'s source from the actual served `templates/index.html`
+  and runs it in a `vm` sandbox with mocked `window.prompt`/`window.confirm`/
+  `socket.emit`, asserting: control-disabled short-circuits before any
+  prompt; a cancelled confirm or cancelled password prompt never emits;
+  an empty password never emits and shows an error; a real password always
+  emits the dict shape (never a bare string) with the typed password in
+  the `password` field; and the function source contains no
+  `localStorage`/`console.log` of the password. This is a static/sandbox
+  check of the exact shipped JS, not a live-browser click-through.
+
+### Known remaining limitations (still open, unchanged by this follow-up)
+
+- **Transport/origin trust**: the password still travels as plain
+  Socket.IO/HTTP payload. Anyone who can observe the page (compromised
+  origin, non-HTTPS deployment, malicious extension, etc.) can observe
+  what the user types into the `window.prompt()` dialog or sniff the
+  payload on the wire. This UI change does not add encryption or add any
+  CSRF/session hardening; deploying this over plain HTTP, or on an
+  untrusted origin, is not materially safer than before. HTTPS + a trusted
+  origin remain the actual control boundary for this transport, same as
+  the pre-existing HTTP header/body password gate.
+- **Broker trust is unchanged and still unverified** by this pass (see
+  Section 3): MQTT commands remain plain-text, unauthenticated at the
+  application layer, same topics/format, trusted entirely to the broker's
+  own auth/ACL, which was not (re-)audited here.
+- **Dispatcher dedupe cache**: reviewed again in this pass; remains a
+  *bounded* FIFO cache (`OrderedDict`, size-capped, evicts oldest), giving
+  only a best-effort, bounded-window de-duplication guarantee for
+  `client_request_id` — not a global, time-unbounded exactly-once
+  guarantee. No undisclosed race was found in the dedupe read/write path
+  beyond what Section 2 already documents (it is read/written entirely
+  under the dispatcher's single lock); this is a scope/guarantee
+  clarification, not a new fix.
+- **HTTP-side cancellation window** (unchanged from Section 5's prior
+  finding): a command already admitted to the executor (state
+  `EXECUTING`) but still blocked on `serial_lock` when the HTTP client's
+  wait deadline is hit cannot be cancelled by that HTTP call — cancellation
+  only ever applies to still-`QUEUED` commands, by design. It can still
+  physically send up to the dispatcher's own TTL window after the HTTP
+  response returns. This is reported truthfully via `state` rather than
+  claimed cancelled, and there is **no absolute "nothing sends after
+  shutdown" guarantee** — only a best-effort check immediately before
+  send, which a true in-flight race could still beat. Not re-litigated or
+  changed in this follow-up; carried over from Section 5 as still accurate.
+
+### Previously disclosed security gap (closed above; kept for history)
+
+WebSocket control-command auth was **not** fully unified with the HTTP
+password gate: legacy bare-string Socket.IO callers (the then-current
+WebUI) were accepted without a password; only the dict form with
+`password` was checked. **This gap is now closed** — see 4a above.
 
 ## 5. Tests (offline only; exact invocation + evidence)
 
@@ -248,14 +329,33 @@ $ venv/bin/python3 -m pytest -q
 172 passed, 33 skipped in 0.52s
 ```
 
-This branch, full suite:
+This branch, after the hardening revision (1537d96, prior to this
+follow-up):
 ```
 $ venv/bin/python3 -m pytest -q
-202 passed, 33 skipped in 3.34s
+269 passed, 33 skipped in 6.28s
 ```
-(172 baseline + 30 new: `tests/test_command_dispatcher.py` [18] +
-`tests/test_command_entrypoints.py` [12]. The 33 skipped hardware-only /
-quirk-ack tests are untouched and remain skipped — same count as baseline.)
+
+This follow-up revision (closing the Socket.IO auth-bypass gap), full
+suite, re-run and counted in this session:
+```
+$ venv/bin/python3 -m pytest -q
+272 passed, 33 skipped in 6.27s
+```
+(269 prior + 3 new: `TestSocketRealTransportTargeting` in
+`tests/test_command_dispatcher_safety.py`, using real — not mocked —
+`flask_socketio` test clients to prove the unauthorized/bare-string
+rejection reaches only the requesting socket and never a bystander, and
+that an authenticated command still executes end-to-end over that real
+transport. Existing socket tests in `TestSocketAuthAndLegacy` and
+`tests/test_command_entrypoints.py::TestSocketEntrypoint` were updated —
+not just left passing by accident — because they previously asserted the
+bare-string bypass as *correct* behavior; they now assert it is rejected.
+The 33 skipped hardware-only/quirk-ack tests are untouched and remain
+skipped — same count as baseline. Separately, `node
+tests/frontend_qa_sendcommand.js` (offline, no browser, no server) passed
+13/13 assertions against the actual shipped `templates/index.html`
+`sendCommand()` source — see Section 4a.)
 
 New test modules:
 - `tests/test_command_dispatcher.py` — unit tests on `CommandDispatcher`
@@ -333,8 +433,18 @@ Recommended before any deploy decision:
 
 ## 7. Remaining limitations / security blockers
 
-- **Socket auth gap**: legacy bare-string Socket.IO commands are
-  unauthenticated (see "Known remaining security gap").
+- **Socket auth gap: CLOSED** by the follow-up revision in Section 4a —
+  legacy bare-string Socket.IO commands are now always rejected
+  (unauthenticated) and never reach the dispatcher; only the
+  password-checked dict shape can execute a command.
+- **Transport/origin trust (still open)**: the control password is still
+  typed into a plain `window.prompt()` and sent as a Socket.IO/HTTP
+  payload; this is only as safe as HTTPS + a trusted origin, which this
+  change does not add or verify.
+- **MQTT broker trust (still open, unchanged)**: MQTT commands remain
+  plain-text and unauthenticated at the application layer; broker auth/ACL
+  is the only control boundary there and was not (re-)audited in this
+  pass.
 - **0x0c32 reply semantics are uncertain**: `docs/MNET.md` documents no reply
   code for the command request (`REQ_COMMAND` / `0x0C32`). `mnet.send_packet`
   therefore requires an exact echo of `0x0c32`, and `_dispatcher_execute`
