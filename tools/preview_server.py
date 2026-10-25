@@ -28,6 +28,7 @@ from flask import Flask, jsonify, make_response, render_template, request, abort
 from flask_socketio import SocketIO, emit
 
 TEMPLATES = Path(__file__).resolve().parent.parent / 'templates'
+STATIC = Path(__file__).resolve().parent.parent / 'static'
 HOST = '127.0.0.1'
 REFRESH_SECONDS = 1.0
 DISCONNECT_AFTER_SECONDS = 4.0
@@ -127,7 +128,7 @@ def _alarms(now):
 
 
 def create_app():
-    app = Flask(__name__, template_folder=str(TEMPLATES))
+    app = Flask(__name__, template_folder=str(TEMPLATES), static_folder=str(STATIC))
     socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=[])
     active = {}              # sid -> scenario, for the refresh loops
     disconnected_seen = {'n': 0}   # 'disconnected' scenario: refuse reconnects after the first drop
