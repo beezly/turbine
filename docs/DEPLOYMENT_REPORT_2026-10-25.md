@@ -165,3 +165,58 @@ explicit deploy step after this PR merges. Live `turbinepi` remains on
 the original pre-merge code (`fcf0a445885e809629598716a0396d2a94e9b080`,
 PID 28099 at report time), unchanged, with zero errors in the journal
 since the rollback.
+
+## Live redeploy — successful, after PR #2 merge
+
+- PR: https://github.com/beezly/turbine/pull/2 (merge commit `0214f17`,
+  head `782c22e`) — merged normally, no direct push to `master`.
+- New backup dir on `turbinepi`:
+  `/home/andy/turbine-backups/pre-deploy-20261025-095441/`
+  (`turbine-new-full.tar.gz` sha256
+  `3d9b3e6431f9e278495dd64325106347b2c7819175cfb6c9d26bf71fa95074ef`,
+  identical content to the earlier backup since `/home/andy/turbine-new`
+  was never modified; `turbine.service.orig`; `metadata.txt`;
+  `rollback.sh`, mode 700, `bash -n` syntax-validated).
+  Exact rollback command if ever needed:
+  `/home/andy/turbine-backups/pre-deploy-20261025-095441/rollback.sh`
+  (removes the drop-in override, `daemon-reload`, `restart` — restores
+  original `/home/andy/turbine-new`, unchanged venv/`.env`/unit).
+- Staged new release: `/home/andy/turbine-new-0214f17` (fresh clone,
+  checked out at merge commit `0214f17`; `.env` copied in at `600`
+  perms; `requirements.txt` byte-identical to the old release, so no
+  new dependencies installed/reviewed). Offline-verified first:
+  `py_compile` of `mnet.py`/`turbine_monitor.py` and `import mnet`
+  succeeded using the existing `turbine-new` pyenv (Python 3.10.4) —
+  same unchanged venv reused for both releases.
+- Switch: same systemd drop-in mechanism as the earlier attempt
+  (`/etc/systemd/system/turbine.service.d/10-release-override.conf`,
+  overriding only `WorkingDirectory`/`ExecStart`); `systemd-analyze
+  verify turbine.service` clean before restart; `turbine.service`
+  restarted (not the controller).
+- **Live verification (automatic polling, not just one-shot `/api/read`
+  success):** polled `/api/read` for wind speed (`id=9c43`) and grid
+  power (`id=9cac`) every ~6-7s across 6 cycles over the restart plus a
+  continued journal review spanning **~73s** total
+  (09:54:49 restart → 09:56:02). Wind speed values were fresh and
+  varying across cycles (10.0, 16.0, 11.0, 20.0, 20.0, 18.0); grid power
+  read a steady -3.0 across the same cycles (plausible at the observed
+  low/variable wind speed — not itself proof of freshness, but
+  corroborated by the wind-speed variation and by zero decode/connection
+  errors on every read in between). `NRestarts=0` throughout; UI root
+  returned HTTP 200; MQTT connected successfully
+  (`"MQTT connected"` in the journal) and the command topic was
+  subscribed — no control/command API calls were made, this is only the
+  startup subscribe.
+- **Journal, full window since restart:** zero `MnetDecodeError`, zero
+  "Reconnection failed", zero tracebacks — the periodic hidden-login
+  path that previously failed within ~10s (see the "Discovered
+  incompatibility" section above) completed cleanly on both the initial
+  login and the scheduled controller time-sync
+  ("Syncing controller time to UTC" / "Controller time synced
+  successfully" — a routine clock-sync write the monitor performs on
+  every startup, not an operator-issued control command). No
+  start/stop/reset/ack/manual-override commands were sent.
+- **Outcome: fix confirmed working on real hardware.** Live `turbinepi`
+  is now running the merged fix
+  (`turbine-new-0214f17`, PID 28480 at verification time) with a fresh,
+  validated, immediately-usable rollback path if ever needed.
