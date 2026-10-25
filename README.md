@@ -54,6 +54,17 @@ python turbine_monitor.py
 
 The web interface will be available at `http://localhost:5000`.
 
+### Demo Mode
+
+```bash
+python turbine_monitor.py --demo
+```
+
+Runs the full monitor against a simulated controller (`demo_controller.py`) instead of a
+serial port: wind, power, events, the LCD and start/stop/reset commands all work. MQTT is
+disabled so simulated data never reaches your broker. Control is enabled with the password
+`demo` unless `TURBINE_CONTROL_PASSWORD` is set (the simulator accepts any password).
+
 ### Using as a Library
 
 ```python
