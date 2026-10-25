@@ -1568,8 +1568,26 @@
                 !window.confirm(`Send ${label} to the turbine?`)) {
                 return;
             }
+            // The server now requires the control password on every socket
+            // command (bare, unauthenticated command strings are rejected
+            // and never queued). Prompt for it here rather than sending a
+            // bare string. The password is never stored (no localStorage,
+            // no persistence across calls) and never written to the
+            // console/logs; it only travels in this one emit payload.
+            // NOTE: this is only as safe as the page's own transport — serve
+            // this UI over HTTPS and a trusted origin, since a plain-HTTP or
+            // compromised-origin page can observe anything typed into it.
+            const password = window.prompt(`Enter control password to send ${label}:`);
+            if (password === null) {
+                // User cancelled — do not emit anything.
+                return;
+            }
+            if (password === '') {
+                setFeedback('err', 'Control password required — command not sent.');
+                return;
+            }
             setFeedback('busy', `Elevating to control login and sending ${label}…`);
-            socket.emit('command', command);
+            socket.emit('command', { command: command, password: password });
         }
 
         function setFeedback(kind, text) {

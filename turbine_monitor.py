@@ -7,6 +7,7 @@ Monitors wind turbine data via Mnet protocol and publishes to MQTT.
 
 import json
 import logging
+import secrets
 import struct
 import time
 import threading
@@ -21,6 +22,7 @@ from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 
 import mnet
+from command_dispatcher import CommandDispatcher, DispatchError, parse_envelope
 
 
 class NotLoggedInError(RuntimeError):
@@ -73,10 +75,20 @@ class TurbineMonitor:
         self.mqtt_host = mqtt_host
         self.web_port = web_port
         self.control_password = control_password
-        self.pending_command: Optional[bytes] = None
-        self.pending_command_name: Optional[str] = None
         self.last_command_result: Optional[dict] = None
-        self.command_lock = threading.Lock()  # serialize /api/command callers
+        self.command_lock = threading.Lock()  # kept: still guards last_command_result reads
+        # Single bounded, serialized dispatcher owns every control-command
+        # submission (MQTT/HTTP/Socket.IO). See command_dispatcher.py.
+        self.command_dispatcher = CommandDispatcher(
+            command_map=self.COMMAND_MAP,
+            executor=self._dispatcher_execute,
+            max_queue=8,
+            default_ttl=30.0,
+            on_result=self._on_dispatcher_result,
+        )
+        # NOTE: the dispatcher worker is started at the very END of __init__,
+        # once serial/mnet/MQTT are fully set up.
+        self.http_command_wait = 20.0  # seconds /api/command waits before giving up
         # Login state broadcast to the UI: mode in hidden|elevating|control|command|reverting
         self.login_state = {'mode': 'hidden', 'detail': 'monitoring (read-only)',
                             'control_available': bool(control_password), 'ts': None}
@@ -113,6 +125,9 @@ class TurbineMonitor:
 
         # Setup MQTT command subscription
         self._setup_command_subscription()
+
+        # Only now is the monitor fully initialized: let the worker execute.
+        self.command_dispatcher.start()
 
     def _create_device(self, connection: str):
         """Create serial or network device based on connection string.
@@ -309,22 +324,50 @@ class TurbineMonitor:
             supplied = request.headers.get('X-Control-Password')
             if supplied is None and request.is_json:
                 supplied = (request.get_json(silent=True) or {}).get('password')
-            if supplied != self.control_password:
+            if not isinstance(supplied, str) or not secrets.compare_digest(supplied, self.control_password):
                 return jsonify({'error': 'unauthorized (bad or missing control password)'}), 401
             if name not in self.COMMAND_MAP:
                 return jsonify({'error': 'unknown command: %s' % name,
                                 'valid': sorted(self.COMMAND_MAP)}), 400
-            with self.command_lock:
-                self.last_command_result = None
-                self.pending_command_name = name
-                self.pending_command = self.COMMAND_MAP[name]
-                deadline = time.time() + 20
-                while self.pending_command is not None and time.time() < deadline:
-                    time.sleep(0.1)
-                if self.pending_command is not None:
-                    return jsonify({'command': name, 'ok': False,
-                                    'error': 'timeout waiting for execution'}), 504
-                return jsonify(self.last_command_result or {'command': name, 'ok': True})
+            from command_dispatcher import CommandState, DispatchError as _DispatchError
+            try:
+                record = self.command_dispatcher.submit(name, source='http')
+            except _DispatchError as e:
+                return jsonify({'command': name, 'ok': False, 'error': e.reason}), e.http_status
+            deadline = time.time() + self.http_command_wait
+            while record.state in (CommandState.QUEUED, CommandState.EXECUTING) and time.time() < deadline:
+                time.sleep(0.05)
+                record = self.command_dispatcher.get(record.request.id) or record
+            if record.state in (CommandState.QUEUED, CommandState.EXECUTING):
+                # Client-side wait timed out. Atomically try to cancel; this
+                # only succeeds while the command is still QUEUED.
+                req_id = record.request.id
+                cancelled = self.command_dispatcher.cancel(req_id)
+                record = self.command_dispatcher.get(req_id) or record
+                if cancelled:
+                    return jsonify({'command': name, 'ok': False, 'id': req_id,
+                                    'state': CommandState.CANCELLED.value,
+                                    'error': 'timed out waiting; command cancelled before execution'}), 504
+                if record.state == CommandState.EXECUTING:
+                    return jsonify({'command': name, 'ok': False, 'id': req_id,
+                                    'state': CommandState.EXECUTING.value,
+                                    'error': 'timed out waiting; command is already executing '
+                                             'and may still take effect'}), 504
+                if record.state == CommandState.QUEUED:
+                    # Cancel failed yet it is still queued: we cannot vouch for it.
+                    return jsonify({'command': name, 'ok': False, 'id': req_id,
+                                    'state': CommandState.UNKNOWN.value,
+                                    'error': 'timed out waiting; could not cancel, command '
+                                             'may still run'}), 504
+                # Finished in the race window: fall through and report truthfully.
+            result = dict(record.result or {})
+            result.setdefault('command', name)
+            result['ok'] = record.state == CommandState.ACKNOWLEDGED
+            result['state'] = record.state.value
+            result['id'] = record.request.id
+            if 'reason' in result and 'error' not in result:
+                result['error'] = result['reason']
+            return jsonify(result)
 
         @self.socketio.on('connect')
         def handle_connect():
@@ -454,35 +497,101 @@ class TurbineMonitor:
         self.logger.info(f"Subscribed to command topic: {command_topic}")
     
     def _handle_command_message(self, client, userdata, message):
-        """Handle incoming MQTT command messages."""
+        """Handle incoming MQTT command messages: single dispatcher entry
+        point. Retained messages are refused BEFORE any queueing -- a
+        retained command is a stale historical intent sitting on the broker,
+        not a live request, and the old code had no defense against one
+        being replayed on reconnect."""
         try:
-            command = message.payload.decode('utf-8').strip().lower()
-            self._log_mqtt('RX', message.topic, command)
-            self.logger.info(f"Received command: {command}")
-            
-            if command in self.COMMAND_MAP:
-                self.pending_command = self.COMMAND_MAP[command]
-                self.pending_command_name = command
-                self.logger.info(f"Queued command: {command}")
-            else:
-                self.logger.warning(f"Unknown command: {command}")
+            raw = message.payload.decode('utf-8')
+            self._log_mqtt('RX', message.topic, raw.strip())
+            envelope = parse_envelope(raw)
+            name = envelope['name']
+            self.logger.info(f"Received command: {name}")
+            try:
+                record = self.command_dispatcher.submit(
+                    name, source='mqtt',
+                    client_request_id=envelope.get('request_id'),
+                    ttl=envelope.get('ttl'),
+                    retained=bool(message.retain),
+                )
+                self.logger.info(f"Queued command: {name} (id={record.request.id}, state={record.state.value})")
+            except DispatchError as e:
+                self.logger.warning(f"Command '{name}' rejected: {e.reason}")
 
         except Exception as e:
             self.logger.error(f"Error handling command: {e}")
             self.logger.error(traceback.format_exc())
 
-    def _handle_socket_command(self, command: str):
-        """Handle incoming socket command from web UI."""
+    def _emit_to_requester(self, event: str, payload: dict):
+        """Emit to only the client that made the current Socket.IO request,
+        instead of broadcasting to every connected socket. Falls back to a
+        broadcast only when there is no active request context (e.g. a
+        direct unit-test call), which matches existing test expectations.
+        Rejection/error payloads passed here must never contain the control
+        password."""
+        sid = None
         try:
-            command = command.strip().lower()
-            self.logger.info(f"Received socket command: {command}")
+            sid = getattr(request, 'sid', None)
+        except Exception:
+            sid = None
+        if sid:
+            self.socketio.emit(event, payload, to=sid)
+        else:
+            self.socketio.emit(event, payload)
 
-            if command in self.COMMAND_MAP:
-                self.pending_command = self.COMMAND_MAP[command]
-                self.pending_command_name = command
-                self.logger.info(f"Queued socket command: {command}")
+    def _handle_socket_command(self, command):
+        """Handle incoming socket command from web UI: funnels through the
+        same dispatcher as MQTT/HTTP.
+
+        Requires a dict {"command": ..., "password": ..., ["request_id"],
+        ["ttl"]} checked against the control password, constant-time, like
+        the HTTP endpoint. Bare strings (the legacy unauthenticated UI
+        shape) are always rejected and never reach the dispatcher. The
+        password is never logged or echoed, and error replies are sent only
+        to the requesting client (never broadcast) so they can never carry a
+        secret to other connected sockets."""
+        try:
+            if isinstance(command, dict):
+                raw_name = command.get('command')
+                name = raw_name.strip().lower() if isinstance(raw_name, str) else ''
+                supplied = command.get('password')
+                authorized = (
+                    isinstance(supplied, str)
+                    and bool(self.control_password)
+                    and secrets.compare_digest(supplied, self.control_password)
+                )
+                if not authorized:
+                    self.logger.warning("Socket command '%s' rejected: unauthorized", name)
+                    self._emit_to_requester('command_result', {'command': name, 'ok': False,
+                                                                 'error': 'unauthorized'})
+                    return
+                envelope = {'name': name, 'request_id': command.get('request_id'),
+                            'ttl': command.get('ttl')}
+            elif isinstance(command, str):
+                # Legacy bare-string shape carries no credential; it must
+                # never be queued for execution, regardless of command name.
+                self.logger.warning("Socket command rejected: bare-string "
+                                    "(unauthenticated) commands are no longer accepted")
+                self._emit_to_requester('command_result', {'command': command, 'ok': False,
+                                                             'error': 'unauthorized: password required'})
+                return
             else:
-                self.logger.warning(f"Unknown socket command: {command}")
+                self._emit_to_requester('command_result', {'command': '', 'ok': False,
+                                                             'error': 'invalid command payload'})
+                return
+            self.logger.info(f"Received socket command: {name}")
+            try:
+                # Synchronous rejects are reported by the dispatcher's
+                # on_result (legacy 'command_result' shape), not re-emitted here.
+                record = self.command_dispatcher.submit(
+                    name, source='socket',
+                    client_request_id=envelope.get('request_id'),
+                    ttl=envelope.get('ttl'),
+                )
+                self.logger.info(f"Queued socket command: {name} (id={record.request.id}, state={record.state.value})")
+            except DispatchError as e:
+                self.logger.warning(f"Socket command '{name}' rejected: {e.reason}")
 
         except Exception as e:
             self.logger.error(f"Error handling socket command: {e}")
@@ -574,45 +683,71 @@ class TurbineMonitor:
         time.sleep(self.INTER_REQUEST_DELAY)
         self._set_login_state('hidden', 'monitoring (read-only)')
 
-    def _execute_pending_command(self):
-        """Execute a pending control command by briefly elevating to a standard
-        (control) login for the command, then dropping back to the hidden login."""
-        if not self.pending_command:
-            return
-        cmd = self.pending_command
-        name = self.pending_command_name or 'command'
-        self.pending_command = None
-        self.pending_command_name = None
+    def _dispatcher_execute(self, request) -> dict:
+        """CommandDispatcher executor callback: run one already-admitted command
+        through the real serial/mnet path. Called from the dispatcher's worker
+        thread, never concurrently (the dispatcher serializes calls one at a
+        time); the serial_lock still guards against the polling loop.
+
+        Briefly elevates to a standard (control) login for the command, then
+        always drops back to the hidden login, exactly as the legacy
+        _execute_pending_command did."""
+        name = request.name
+        cmd = self.COMMAND_MAP[name]
 
         if not self.control_password:
             self.logger.warning("Control command '%s' refused: no control password configured", name)
-            self.socketio.emit('command_result',
-                               {'command': name, 'ok': False, 'error': 'Control disabled (no password set)'})
             self._set_login_state('hidden', 'control disabled (no password set)')
-            return
+            return {'command': name, 'ok': False, 'reason': 'Control disabled (no password set)'}
 
         with self.serial_lock:
             try:
-                self._clear_serial_buffers()
-                # 1. elevate to the standard (control) login
-                self._set_login_state('elevating', 'standard login (control)')
-                self.mnet_client.login_standard(self.DESTINATION, self.control_password)
-                time.sleep(self.INTER_REQUEST_DELAY)
-                self._set_login_state('control', 'control login active')
-                # 2. issue the command
-                self._set_login_state('command', f'sending {name.upper()}')
-                self.logger.info("Executing control command: %s", name)
-                result = self.mnet_client.send_command(self.DESTINATION, cmd)
-                reply = result.packet_type.hex()
+                # ---- pre-send phase: the control command has not been sent,
+                # so any failure here is a clean REJECT (never UNKNOWN).
+                try:
+                    self._clear_serial_buffers()
+                    # 1. elevate to the standard (control) login
+                    self._set_login_state('elevating', 'standard login (control)')
+                    self.mnet_client.login_standard(self.DESTINATION, self.control_password)
+                    time.sleep(self.INTER_REQUEST_DELAY)
+                    self._set_login_state('control', 'control login active')
+                except Exception as e:
+                    self.logger.error("Command '%s' not sent, elevation failed: %s", name, e)
+                    self.logger.error(traceback.format_exc())
+                    return {'command': name, 'ok': False,
+                            'reason': 'login failed before send: %s' % e}
+
+                # Authoritative shutdown/expiry check, under serial_lock,
+                # immediately before the physical send.
+                if self.command_dispatcher.is_shutting_down():
+                    return {'command': name, 'ok': False, 'cancelled_before_send': True,
+                            'reason': 'dispatcher shutting down; command not sent'}
+                if self.command_dispatcher.is_expired(request):
+                    self.logger.warning("Command '%s' expired before send; not sent", name)
+                    return {'command': name, 'ok': False, 'expired_before_send': True,
+                            'reason': 'expired before send; command not sent'}
+
+                # ---- send phase: any failure from here leaves the outcome
+                # uncertain, so it is surfaced as TimeoutError (-> UNKNOWN).
+                try:
+                    # 2. issue the command
+                    self._set_login_state('command', f'sending {name.upper()}')
+                    self.logger.info("Executing control command: %s", name)
+                    result = self.mnet_client.send_command(self.DESTINATION, cmd)
+                    packet_type = getattr(result, 'packet_type', None)
+                    # send_packet already enforces the reply type; re-check so a
+                    # malformed or nack-shaped reply is never treated as success.
+                    if not isinstance(packet_type, (bytes, bytearray)) or \
+                            bytes(packet_type) != mnet.Mnet.REQ_COMMAND:
+                        raise ValueError('unexpected command reply: %r' % (packet_type,))
+                    reply = bytes(packet_type).hex()
+                except Exception as e:
+                    self.logger.error("Command '%s' send outcome unknown: %s", name, e)
+                    self.logger.error(traceback.format_exc())
+                    raise TimeoutError('send outcome unknown: %s' % e) from e
                 self.logger.info("Command '%s' reply: %s", name, reply)
                 time.sleep(self.INTER_REQUEST_DELAY)
-                self.last_command_result = {'command': name, 'ok': True, 'reply': reply}
-                self.socketio.emit('command_result', self.last_command_result)
-            except Exception as e:
-                self.logger.error("Command '%s' failed: %s", name, e)
-                self.logger.error(traceback.format_exc())
-                self.last_command_result = {'command': name, 'ok': False, 'error': str(e)}
-                self.socketio.emit('command_result', self.last_command_result)
+                return {'command': name, 'ok': True, 'reply': reply}
             finally:
                 # 3. always drop back to the hidden read-only login
                 try:
@@ -621,8 +756,53 @@ class TurbineMonitor:
                     self.mnet_client.login(self.DESTINATION)
                     time.sleep(self.INTER_REQUEST_DELAY)
                 except Exception as e:
+                    # Real login state is now unknown: force a fresh login in run().
+                    self.logged_in = False
                     self.logger.error("Failed to revert to hidden login: %s", e)
                 self._set_login_state('hidden', 'monitoring (read-only)')
+
+    def _on_dispatcher_result(self, record) -> None:
+        """Dispatcher callback fired once a command reaches a terminal state
+        (ACKNOWLEDGED/REJECTED/EXPIRED/CANCELLED/UNKNOWN). Preserves the
+        legacy 'command_result' socket event shape (command/ok/[reply|error])
+        for the existing WebUI, and additionally publishes a non-retained,
+        additive MQTT result topic. Truthful terminal states only: 'ok' is
+        only True for ACKNOWLEDGED; everything else (including UNKNOWN) is
+        reported as not-ok with an explicit reason/state, never papered over
+        as success."""
+        from command_dispatcher import CommandState
+        name = record.request.name
+        legacy = {'command': name, 'ok': record.state == CommandState.ACKNOWLEDGED}
+        if record.result:
+            if 'reply' in record.result:
+                legacy['reply'] = record.result['reply']
+            if 'reason' in record.result:
+                legacy['error'] = record.result['reason']
+        elif record.state != CommandState.ACKNOWLEDGED:
+            legacy['error'] = record.state.value
+
+        self.last_command_result = legacy
+        try:
+            self.socketio.emit('command_result', legacy)
+        except Exception:
+            pass
+
+        try:
+            result_payload = {
+                'id': record.request.id,
+                'source': record.request.source,
+                'command': name,
+                'state': record.state.value,
+                'received_at': record.request.received_at,
+                'started_at': record.started_at,
+                'finished_at': record.finished_at,
+                'reason': record.result.get('reason') if record.result else None,
+            }
+            topic = f"{self.TOPIC_PREFIX}{self.serial_number}/command_result"
+            self.mqtt_client.publish(topic, json.dumps(result_payload), qos=0, retain=False)
+        except Exception as e:
+            # Never let a broker hiccup take down command execution.
+            self.logger.warning("Failed to publish command_result (non-fatal): %s", e)
 
     def _sync_controller_time(self):
         """Sync controller time to current UTC if interval has elapsed."""
@@ -788,9 +968,6 @@ class TurbineMonitor:
                 if not self.logged_in:
                     self._login_to_turbine()
 
-                # Execute any pending commands
-                self._execute_pending_command()
-
                 # Sync controller time periodically
                 self._sync_controller_time()
 
@@ -874,9 +1051,30 @@ class TurbineMonitor:
     def close(self):
         """Clean shutdown."""
         self.logger.info("Shutting down turbine monitor")
-        self.mqtt_client.loop_stop()
-        self.mqtt_client.disconnect()
-        self.serial_device.close()
+        # Stop the dispatcher FIRST: queued commands are cancelled, no new
+        # physical send can start, and an in-flight one may finish.
+        if not self.command_dispatcher.stop():
+            self.logger.warning("Command dispatcher still busy at shutdown; waiting for serial lock")
+        got_lock = self.serial_lock.acquire(timeout=5.0)
+        try:
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+            if got_lock:
+                self.serial_device.close()
+            else:
+                # Could not confirm the serial link is idle (a command may
+                # still be mid-send). Closing the device out from under it
+                # would be a use-after-close on a live transfer, so leave the
+                # device open; the process exiting will release the fd, and
+                # we log loudly rather than silently racing the executor.
+                self.logger.error(
+                    "Shutdown: serial_lock not acquired within 5s; a command "
+                    "may still be mid-send, leaving serial device open rather "
+                    "than closing out from under it"
+                )
+        finally:
+            if got_lock:
+                self.serial_lock.release()
 
 
 def main():
