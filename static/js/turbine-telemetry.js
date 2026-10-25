@@ -118,3 +118,38 @@ export function deriveRotorState(status, rawData, nowMs) {
   }
   return { spinning: true, rpm, telemetry, label: 'RUNNING', stale: false };
 }
+
+/** Max wind speed (m/s) used to normalize grass-bend intensity; clamps above this. */
+export const WIND_VISUAL_MAX_MPS = 20;
+
+/**
+ * Derive the grass-field wind animation state from real telemetry, gated
+ * INDEPENDENTLY of rotor state (wind can be measured even while the rotor
+ * is stopped/braked, and the rotor must never be driven by this value).
+ *
+ * This is deliberately conservative about what counts as "real": any
+ * staleness/disconnect/missing/invalid wind reading freezes the grass and
+ * reports it as unavailable, rather than guessing or holding the last
+ * value forever. A genuine zero reading (calm) is a valid, different
+ * state (grass settles, fully still, but status is NOT "unavailable").
+ *
+ * The travelling gust/wave PATTERN itself (direction, spatial noise) is a
+ * simulated illustration and is documented as such; only the overall
+ * bend/sway INTENSITY is driven by the real wind_speed_mps value.
+ */
+export function deriveWindState(status, rawData, nowMs) {
+  const stale = isStale(status, nowMs);
+  const telemetry = mapTelemetry(rawData);
+  if (stale) {
+    return { active: false, intensity: 0, windSpeedMps: null, label: 'WIND: NO DATA', unavailable: true };
+  }
+  const speed = telemetry.windSpeedMps;
+  if (speed === null || !Number.isFinite(speed) || speed < 0) {
+    return { active: false, intensity: 0, windSpeedMps: null, label: 'WIND: NO DATA', unavailable: true };
+  }
+  if (speed === 0) {
+    return { active: false, intensity: 0, windSpeedMps: 0, label: 'WIND: CALM', unavailable: false };
+  }
+  const intensity = Math.max(0, Math.min(1, speed / WIND_VISUAL_MAX_MPS));
+  return { active: true, intensity, windSpeedMps: speed, label: `WIND: ${speed.toFixed(1)} m/s (illustrative)`, unavailable: false };
+}

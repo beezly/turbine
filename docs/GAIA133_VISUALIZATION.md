@@ -124,6 +124,47 @@ not rotate the nacelle to a "true" wind direction — the nacelle orientation
 is a fixed, labeled approximation (documented in the on-page "3D
 illustration / orientation approximate" note), not a claim of real yaw.
 
+### Grass gust-band forcing model (illustrative, cited)
+
+The travelling gust-band pattern in the long grass is **not** derived from
+real measured gust/direction data (none exists in the telemetry payload).
+It is an explicit, cited physical-illustration model, adopted per direct
+review instruction:
+
+- **Source**: "A Wave-Theoretic Model of Wind-Induced Wheat Field Motion"
+  (Academie royale de Belgique,
+  `popups.uliege.be/2593-4228/index.php?id=1986`).
+- **Model**: each grass stalk is treated as an inverted pendulum (length
+  `L~1m`, tip mass `m=0.005kg`, bending stiffness `kappa=EI~2e-3 N*m` for
+  `E~5GPa`, 5mm outer diameter, 0.5mm wall), giving a natural frequency
+  `omega0 = sqrt(kappa/(m*L^2)) ~ 2 rad/s` (~3.1s sway period) — used
+  directly as `OMEGA0` in `_buildGrass()`.
+- The governing PDE is Klein-Gordon
+  (`d2z/dt2 = v^2*laplacian(z) - omega0^2*z + f/m`), dispersion
+  `omega^2 = omega0^2 + v^2*k^2` (gapped, quadratic branch). The PDE
+  itself is **not** implemented; only its quasi-static forcing limit
+  (`z ~= f/(m*omega0^2)`), a small sum of cosines, matching the paper's
+  own simulation approach and cheap enough for a per-vertex shader.
+- **Forcing**: `f(x,z,t) = sum_n A_n * cos(k_n . x - omega_n*t + phi_n)`,
+  `NUM_MODES = 7` (paper uses 50 over a 50x50m domain; fewer modes here,
+  same structure). `k_n` log-spaced over `[0.63, 6.28] 1/m` (wavelength
+  1-10m). **`A_n` is proportional to `k_n^-2`** — long wavelengths
+  dominate, short ones are fine texture on top; this is the detail that
+  turns visually-uniform dust into legible travelling bands. Direction is
+  a narrow ~30deg cone (paper's spread) about the NW->SE illustrative wind
+  vector, not isotropic. `phi_n` is random but **fixed once at
+  initialization**, never re-randomized per frame — time enters only via
+  `omega_n*t`, so the pattern genuinely translates rather than jittering.
+  Illustrative transverse wave speed `v = 1.5 m/s` (not from the paper;
+  our own choice for the dispersion term, since the paper's measured `v`
+  wasn't available to port directly).
+- Real `wind_speed_mps` telemetry drives only the overall bend/sway
+  **amplitude** multiplier (`windIntensity`) applied in the shader on top
+  of this field — the mode structure, direction cone, and gust pattern
+  are illustrative, not measured local gusts or measured wind direction.
+- Per the Codex Leicester (quoted in the paper): the wave pattern travels,
+  the medium does not — blades oscillate in place with no net drift.
+
 ## Lifecycle, performance, and accessibility
 
 - **Lazy load**: Babylon.js + the scene module are only fetched when the

@@ -7,6 +7,7 @@ import {
   isStale,
   mapTelemetry,
   deriveRotorState,
+  deriveWindState,
   STALE_THRESHOLD_MS,
 } from '../../static/js/turbine-telemetry.js';
 
@@ -152,4 +153,44 @@ test('deriveRotorState: connected + positive RPM => RUNNING at that RPM', () => 
   assert.equal(state.spinning, true);
   assert.equal(state.rpm, 46.5);
   assert.equal(state.label, 'RUNNING');
+});
+
+test('deriveWindState: stale/disconnected => unavailable, no sway', () => {
+  const state = deriveWindState({ connected: false }, { wind_speed_mps: 12 }, Date.now());
+  assert.equal(state.active, false);
+  assert.equal(state.intensity, 0);
+  assert.equal(state.unavailable, true);
+});
+
+test('deriveWindState: connected but missing wind_speed_mps => unavailable', () => {
+  const status = { connected: true, last_update: new Date().toISOString(), server_time: new Date().toISOString() };
+  const state = deriveWindState(status, {}, Date.now());
+  assert.equal(state.active, false);
+  assert.equal(state.unavailable, true);
+});
+
+test('deriveWindState: connected + 0 m/s => calm, settled, not "unavailable"', () => {
+  const status = { connected: true, last_update: new Date().toISOString(), server_time: new Date().toISOString() };
+  const state = deriveWindState(status, { wind_speed_mps: 0 }, Date.now());
+  assert.equal(state.active, false);
+  assert.equal(state.intensity, 0);
+  assert.equal(state.unavailable, false);
+  assert.equal(state.windSpeedMps, 0);
+});
+
+test('deriveWindState: connected + positive wind => active, intensity scales with speed, clamped', () => {
+  const status = { connected: true, last_update: new Date().toISOString(), server_time: new Date().toISOString() };
+  const low = deriveWindState(status, { wind_speed_mps: 2 }, Date.now());
+  const high = deriveWindState(status, { wind_speed_mps: 40 }, Date.now());
+  assert.equal(low.active, true);
+  assert.ok(low.intensity > 0 && low.intensity < 1);
+  assert.equal(high.active, true);
+  assert.equal(high.intensity, 1); // clamped at WIND_VISUAL_MAX_MPS
+});
+
+test('deriveWindState: negative/invalid wind reading => treated as unavailable, not fabricated', () => {
+  const status = { connected: true, last_update: new Date().toISOString(), server_time: new Date().toISOString() };
+  const state = deriveWindState(status, { wind_speed_mps: -3 }, Date.now());
+  assert.equal(state.unavailable, true);
+  assert.equal(state.active, false);
 });
