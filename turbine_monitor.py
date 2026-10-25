@@ -7,7 +7,6 @@ Monitors wind turbine data via Mnet protocol and publishes to MQTT.
 
 import json
 import logging
-import secrets
 import struct
 import time
 import threading
