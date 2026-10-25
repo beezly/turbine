@@ -208,12 +208,18 @@ class Mnet:
     # quirk: this firmware acknowledges a successful hidden login with the
     # generic 0x0001 ack instead of echoing 0x13A1.
     #
-    # This is intentionally NOT extended to REQ_LOGIN_STANDARD (0x138E,
-    # control/write login): no hardware evidence exists for that request
-    # type's reply behaviour (control commands were never exercised against
-    # this controller during the deploy attempt), so it still requires an
-    # exact echo or the documented 0x1390 rejection -- do not infer the same
-    # quirk applies there without separately observed evidence.
+    # Update: a live RESET attempt against this same controller at
+    # 2026-10-25 22:22:10 UTC showed REQ_LOGIN_STANDARD (0x138E,
+    # control/write login) *also* gets a 0x0001 reply -- the controller-wide
+    # generic-ack quirk is not limited to hidden login. This is separately
+    # observed evidence for the standard login specifically (not an
+    # inference carried over from the hidden-login case): a bounded,
+    # redacted journalctl excerpt from that exact timestamp showed a
+    # correctly-addressed 0x0001 reply to a login_standard() call, never
+    # the documented 0x1390 rejection. REQ_LOGIN_STANDARD now accepts
+    # 0x0001 for the same evidence-based reason REQ_LOGIN already does --
+    # this is NOT a blanket widening of accepted packet types; it is
+    # scoped to this one request type, backed by this one observation.
     REPLY_ACK = b'\x00\x01'
 
     # Request packet type -> set of documented valid reply packet types.
@@ -245,8 +251,10 @@ class Mnet:
         # Hidden login: echo (0x13A1) or 0x1390 rejection per docs/MNET.md,
         # PLUS the hardware-observed 0x0001 generic-ack quirk above.
         REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN, REPLY_ACK}),
-        # Standard (control) login: no 0x0001 evidence -- keep strict.
-        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN}),  # standard login: echo on success, 0x1390 on rejection
+        # Standard (control) login: echo on success, 0x1390 on rejection,
+        # PLUS the hardware-observed 0x0001 generic-ack quirk (see REPLY_ACK
+        # comment above for the 2026-10-25 22:22 UTC evidence).
+        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN, REPLY_ACK}),
     }
 
     # Login constants
