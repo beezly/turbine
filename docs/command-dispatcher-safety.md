@@ -14,12 +14,18 @@ Status: **local branch only. No push, no PR, no merge, no deploy in this pass.**
   If the live box is a different physical host ("turbinepi"), it was not
   reachable from this execution context and was not touched, per the
   explicit instruction not to.
-- **HA / domesticgoddess MQTT automation audit**: not performed. No
-  `/mnt/ha` path was accessible from this host and no cooperating HA agent
-  was available in this pass. This is a real gap in the "no breaking
-  callers" guarantee below — any Home Assistant automation subscribing to
-  `turbine/<serial>/command_result` or depending on retained-command replay
-  was not inventoried. Flag for follow-up before deploy.
+- **HA / MQTT automation audit (independent, read-only, INCOMPLETE)**: a
+  separate read-only inspection of Home Assistant `automations.yaml`,
+  `scripts.yaml` and the MQTT config found no `turbine/<serial>/command`
+  publishers and no dynamic command topic in the top-level HA
+  automations/scripts/helpers/dashboards. One unrelated `mqtt.publish`
+  automation exists (an ebusd poll payload). HA's turbine MQTT config is a
+  telemetry subscriber only, with unchanged JSON fields. A Shelly
+  switch/reboot entity is not an MQTT command path. This audit did **not**
+  cover HA packages or `custom_components`, external publishers, Node-RED,
+  or broker ACLs. It therefore does **not** show that no command callers
+  exist globally, only that none were found in the inspected top-level HA
+  config. No HA or broker config was queried or changed by this work.
 - **Broker ACL/auth change**: none made. See Section 3 (Security gap) —
   this is deliberately read-only/documentary this pass.
 - **Deployment**: none. This is a reviewed, offline-tested local branch,
@@ -30,8 +36,13 @@ Status: **local branch only. No push, no PR, no merge, no deploy in this pass.**
 | Interface | Accepted input (legacy, verified in code) | Case/whitespace | Response contract |
 |---|---|---|---|
 | MQTT `turbine/<serial>/command` | bare plain-text payload, one of `start, stop, reset, manual_start, auto, ack` (`COMMAND_MAP` keys) | `.strip().lower()` applied; any case/leading-trailing whitespace accepted | none (fire-and-forget; no MQTT reply topic existed before this change) |
-| Socket.IO `command` event | same bare string, same `COMMAND_MAP` | `.strip().lower()` | `command_result` socket event: `{'command', 'ok', ['reply'|'error']}` |
-| HTTP `POST /api/command/<name>` | `<name>` path segment, same `COMMAND_MAP`; password via `X-Control-Password` header or JSON body `{"password": ...}` | `.strip().lower()` | synchronous JSON: `{'command','ok', 'reply'|'error'}`; 401 unauthorized, 400 unknown command, 504 on 20s timeout |
+| Socket.IO `command` event | same bare string, same `COMMAND_MAP` (still accepted, unauthenticated, logs a warning); NEW optional dict `{"command", "password", ["request_id"], ["ttl"]}` | `.strip().lower()` | `command_result` socket event: `{'command', 'ok', ['reply'|'error']}` (unchanged); dict with bad/missing password -> `{'command','ok':False,'error':'unauthorized'}` |
+| HTTP `POST /api/command/<name>` | `<name>` path segment, same `COMMAND_MAP`; password via `X-Control-Password` header or JSON body `{"password": ...}` | `.strip().lower()` | synchronous JSON: `{'command','ok', 'reply'|'error', 'state','id'}`; 401 unauthorized, 400 unknown command, 429 queue full, 504 on 20s wait timeout (now with truthful `state`: `cancelled`, `executing` or `unknown`) |
+
+(The table above describes the legacy contract; the "Socket" and "HTTP"
+cells have been updated for this revision's additive changes only. MQTT
+topic names, plain-text payloads and broker authentication behaviour are
+unchanged.)
 
 All three interfaces previously wrote into **the same two shared mutable
 instance fields** (`self.pending_command`, `self.pending_command_name`) with
@@ -103,7 +114,67 @@ removed code), not assumed from documentation.
   same priority as everything else. This was a deliberate choice to avoid
   inventing safety semantics the hardware/protocol doesn't actually have.
 
+### 2a. Hardening revision (items 1–7 of the safety follow-up)
+
+1. **HTTP wait timeout is truthful.** After the 20s wait (`http_command_wait`)
+   the handler atomically tries `cancel(id)`. Success -> 504 with state
+   `cancelled`. If the command is already `executing` -> 504 with state
+   `executing` and a message that it may still take effect. If it finished in
+   the race window the real terminal result is returned as usual. If it is
+   still `queued` but could not be cancelled, state `unknown` is reported.
+2. **Authoritative pre-send check.** Inside `_dispatcher_execute`, under
+   `serial_lock`, after the standard login and immediately before
+   `send_command`, expiry and shutdown are re-checked. If expired the command
+   is NOT sent, the login reverts to hidden, and the executor returns
+   `expired_before_send` -> `EXPIRED`. If shutting down it returns
+   `cancelled_before_send` -> `CANCELLED`.
+   `CommandDispatcher.stop()` atomically cancels all still-`QUEUED` commands
+   (`CANCELLED`, reason "dispatcher shutting down", result emitted once) and
+   the worker never starts a new send after `stop()`; it only finishes a
+   command it had already begun.
+3. **Pre-send vs send phase.** Pre-send failures (bad password, login error)
+   -> `REJECTED` (never sent). Any failure once sending starts (exception,
+   `TimeoutError`, or a reply that is not a `bytes` packet type equal to
+   `0x0c32`) is re-raised as `TimeoutError` -> `UNKNOWN`; never `REJECTED`,
+   never a false `ACKNOWLEDGED`.
+4. **Callbacks outside the lock, exactly once.** `on_result` is invoked after
+   `self._lock` is released on every terminal path (normal, timeout,
+   exception, expired in queue, expired at enqueue, cancel, shutdown cancel).
+   Synchronous `DispatchError` rejects still raise, and additionally emit one
+   `REJECTED` result through `on_result` (the rejected request is never
+   queued or stored, so queue state and controller state are untouched). As a
+   consequence the socket handler no longer emits its own rejection (the
+   dispatcher callback emits the identical legacy-shaped `command_result`),
+   and MQTT/HTTP rejects now also appear as a `command_result` event and on
+   the non-retained `command_result` MQTT topic (additive).
+5. **Input validation.** `ttl=None` -> default; `ttl=0` -> immediately
+   `EXPIRED`; booleans, non-numbers, NaN/Inf, negatives and values over 300s
+   -> `DispatchError` 400. `client_request_id` must be a non-empty string of
+   <= 200 chars. Reusing a `client_request_id` for a *different* command ->
+   409 conflict (same command still dedupes as before).
+   `_trim_records()` only evicts terminal records, oldest first; `QUEUED` /
+   `EXECUTING` are never evicted. Behaviour change: a negative `ttl` used to
+   mean "expired"; it is now a 400.
+6. **Lifecycle.** The dispatcher worker starts at the end of
+   `TurbineMonitor.__init__`. `close()` stops the dispatcher first (waiting
+   up to 5s for `serial_lock`) before disconnecting MQTT and closing the
+   device. If reverting to the hidden login fails, `logged_in` is set to
+   `False` so `run()` re-logs in.
+7. **Socket.IO auth (partial).** A dict payload is checked against
+   `control_password`; mismatch -> `error: unauthorized`, password never
+   logged or echoed. Bare strings keep working (warning logged).
+
 ## 3. MQTT broker authentication — read-only inventory + security gap
+
+### Broker auth / ACL
+
+The current code does not call any broker authentication or ACL API, so it
+does **not** prove the broker is anonymous or secured; that is unknown and
+unverified from the code alone. The only broker-related setting referenced in
+this repo is the `MQTT_HOST` env var (read in `main()`); no username, password
+or TLS configuration key exists, so there is no optional auth support to note
+as unchanged. This revision adds no MQTT auth and does not change any topic,
+payload format or broker authentication behaviour.
 
 **Read-only finding (config key names only, no values read or printed):**
 the only broker-related configuration key in this codebase is `MQTT_HOST`
@@ -119,8 +190,8 @@ There is **no call to `client.username_pw_set()`, no TLS context, and no
 client-certificate configuration anywhere in this repository.** No
 credential env vars (`MQTT_USER`, `MQTT_PASS`, etc.) exist in this code.
 
-**SECURITY GAP (explicit, not silently bypassed):** this client connects
-anonymously. Whether the broker itself enforces authentication/ACLs at the
+**SECURITY GAP (explicit, not silently bypassed):** this client presents no
+credentials. Whether the broker itself enforces authentication/ACLs at the
 network layer is **unknown from this codebase alone** — that is broker-side
 configuration this repo does not control or ship, and auditing the actual
 running broker's ACL/auth state was out of scope for this pass (no broker
@@ -150,7 +221,23 @@ future web-auth migration (e.g. session/CSRF hardening) is out of scope
 here and was not silently assumed "already protected" anywhere in this
 change.
 
+### Known remaining security gap
+
+WebSocket control-command auth is **not** fully unified with the HTTP
+password gate. Legacy bare-string Socket.IO callers (the current WebUI) are
+still accepted without a password; only the new dict form with `password` is
+checked. This is a disclosed limitation. Closing it needs a session/auth
+migration decision that is out of scope for this change.
+
 ## 5. Tests (offline only; exact invocation + evidence)
+
+> **Revision note:** the figures below are from the earlier pass. The
+> hardening revision added `tests/test_command_dispatcher_safety.py` and
+> changed one assertion in `tests/test_command_dispatcher.py` (negative ttl
+> -> `ttl=0`). The suite could not be executed in the authoring session
+> (command execution was not permitted), so there are **no verified counts
+> for this revision**; run `python3 -m pytest` and record real counts before
+> relying on it.
 
 Host: node `deb`, checkout `/home/andy/projects/turbine`,
 venv: `venv/bin/python3` (Python 3.11.14, pytest 9.1.1).
@@ -193,10 +280,40 @@ No real MQTT broker, serial device, or network socket was opened by any
 test. No test imports or executes any live-hardware path; the pytest
 hardware-skip markers are unaffected (33 skipped, matching baseline).
 
-**Independent review**: not performed as a separate actual-Claude
-plan-mode pass in this run (no second reviewing agent was spawned for this
-diff). Flag as a remaining step before merge if an independent review gate
-is required by policy.
+**Independent review**: performed as a separate actual-Claude plan-mode
+pass (read-only, no edits) against this diff. Verdict: **no blockers**.
+Minor/nit findings and their resolution:
+- Huge-integer `ttl` (e.g. a 400-digit literal) could raise `OverflowError`
+  inside `_validate_ttl` and escape `submit()` with no terminal state ever
+  recorded. **Fixed**: `math.isfinite`/comparison now wrapped so any
+  out-of-range value, however large, is a clean 400 `DispatchError`; a
+  regression case (`10**400` and its negative) was added to
+  `test_invalid_ttl_rejected`.
+- `close()` closed the serial device even when `serial_lock.acquire(timeout=5)`
+  failed (i.e. a command might still be mid-send). **Fixed**: the device is
+  now only closed when the lock was actually acquired; otherwise it logs
+  loudly and leaves the device open rather than racing an in-flight send.
+- A command already marked EXECUTING but still blocked on `serial_lock` when
+  an HTTP client's 20s wait expires cannot be cancelled by that endpoint
+  call; it can still send up to the dispatcher's own TTL window later. This
+  is reported truthfully (`state: executing`/`unknown`) rather than claimed
+  cancelled — **documented as a known residual gap**, not fixed in this
+  pass (closing it fully needs either passing the HTTP wait window through
+  as the request `ttl`, or a separate cooperative-cancel flag checked inside
+  the executor; left as a follow-up, not silently claimed done).
+- `client_request_id` dedupe hits on a request whose original outcome was
+  terminal (CANCELLED/EXPIRED/REJECTED) return that stale terminal record
+  without re-emitting a result to the new caller, and a plain duplicate
+  across unrelated clients using a weak id collides silently. **Documented**
+  as a known limitation of the dedupe cache (not fixed in this pass).
+- Socket/HTTP password comparison is a plain `!=`, not constant-time
+  (`hmac.compare_digest`); pre-existing behavior, not introduced by this
+  change. **Documented**, not fixed in this pass.
+- `_set_login_state('command', ...)` (a socketio emit) sits inside the
+  send-phase try/except; if that emit itself raised, a pre-send failure
+  would be misclassified as UNKNOWN instead of REJECTED. Noted as a
+  theoretical edge case (socketio.emit failures are not observed in
+  practice here); not fixed in this pass.
 
 **Browser/UI QA**: no UI/template files were modified in this change (the
 WebUI's existing `command_result` socket-event consumption is unchanged in
@@ -213,3 +330,30 @@ Recommended before any deploy decision:
 4. Validate against the actual live turbinepi device's current release
    once the above are resolved, under a separate explicit deploy
    authorization — this pass intentionally did not touch that device.
+
+## 7. Remaining limitations / security blockers
+
+- **Socket auth gap**: legacy bare-string Socket.IO commands are
+  unauthenticated (see "Known remaining security gap").
+- **0x0c32 reply semantics are uncertain**: `docs/MNET.md` documents no reply
+  code for the command request (`REQ_COMMAND` / `0x0C32`). `mnet.send_packet`
+  therefore requires an exact echo of `0x0c32`, and `_dispatcher_execute`
+  re-checks that. We have no evidence that an echoed `0x0c32` guarantees the
+  controller *acted* on the command (as opposed to merely receiving it), so
+  `ACKNOWLEDGED` means "well-formed reply received", not "command effect
+  verified". Confirm the effect via telemetry/status.
+- **Broker auth unknown**: see "Broker auth / ACL". Not verified either way.
+- **Expiry for legacy callers** is measured from receive time.
+- **Incomplete HA audit** (Section 0): other publishers may exist.
+- **UNKNOWN is final**: no automatic resend; an operator must check status.
+- **HTTP-timeout-vs-already-executing race**: if a command is EXECUTING but
+  still waiting on `serial_lock` when the HTTP 20s wait gives up, it cannot
+  be cancelled from that request and may still send within its TTL window;
+  reported truthfully, not fixed (see Section 5 "Independent review").
+- **Dedupe cache on a terminal (non-success) prior outcome**: reusing a
+  `client_request_id` after a CANCELLED/EXPIRED/REJECTED prior attempt
+  returns that stale record with no new result emitted until the id ages
+  out of the 256-entry FIFO; not fixed (see Section 5).
+- **Password comparisons are not constant-time** (`!=`, not
+  `hmac.compare_digest`) on both the HTTP and socket control-password
+  checks; pre-existing, not introduced or fixed here.

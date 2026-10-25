@@ -108,7 +108,8 @@ def test_expiry_checked_at_enqueue_when_already_past_deadline():
     d, _ = make_dispatcher(clock=clock)
     d.start()
     try:
-        record = d.submit("start", source="mqtt", ttl=-1)
+        # ttl=0 means "already expired"; negative ttl is now a DispatchError.
+        record = d.submit("start", source="mqtt", ttl=0)
         assert record.state == CommandState.EXPIRED
         assert d.queue_depth() == 0
     finally:

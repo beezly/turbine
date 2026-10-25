@@ -17,11 +17,18 @@ Design notes / honest limitations:
   with internally generated request ids. An optional JSON envelope lets a
   caller supply its own request_id/expiry for dedup purposes only; it never
   changes required behavior for legacy callers.
+- on_result is always invoked OUTSIDE the dispatcher lock, exactly once per
+  terminal transition, so a slow or re-entrant callback cannot deadlock or
+  block unrelated submissions.
+- Executor result conventions (see _run): ``expired_before_send`` -> EXPIRED,
+  ``cancelled_before_send`` -> CANCELLED, ``ok`` -> ACKNOWLEDGED, otherwise
+  REJECTED; a raised TimeoutError -> UNKNOWN.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import uuid
@@ -29,6 +36,9 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, Optional
+
+MAX_TTL_SECONDS = 300.0
+MAX_REQUEST_ID_LEN = 200
 
 
 class CommandState(str, Enum):
@@ -139,12 +149,37 @@ class CommandDispatcher:
         self._worker = threading.Thread(target=self._run, name="command-dispatcher", daemon=True)
         self._worker.start()
 
-    def stop(self, timeout: float = 5.0):
+    def stop(self, timeout: float = 5.0) -> bool:
+        """Request shutdown. Every still-QUEUED command is atomically
+        cancelled (terminal CANCELLED result emitted exactly once, outside the
+        lock) and the worker never starts a new physical send afterwards; it
+        may only finish a command it had already begun. Returns True if the
+        worker has exited."""
         with self._lock:
             self._shutdown = True
+            drained = []
+            now = self._clock()
+            while self._queue:
+                record = self._queue.popleft()
+                self._finalize(record, CommandState.CANCELLED,
+                               {"ok": False, "reason": "dispatcher shutting down"}, now)
+                drained.append(record)
             self._not_empty.notify_all()
+        for record in drained:
+            self._emit_result(record)
         if self._worker:
             self._worker.join(timeout=timeout)
+            return not self._worker.is_alive()
+        return True
+
+    def is_shutting_down(self) -> bool:
+        with self._lock:
+            return self._shutdown
+
+    def is_expired(self, request: CommandRequest) -> bool:
+        """Expiry test against the dispatcher's own clock (used by the
+        executor for the authoritative check right before a physical send)."""
+        return request.is_expired(self._clock())
 
     # ---- submission (the ONE path for every interface) ------------------
     def submit(
@@ -159,10 +194,23 @@ class CommandDispatcher:
         """Validate, dedupe, and enqueue one command request.
 
         Raises DispatchError for synchronous rejects (unknown command,
-        retained message, queue full). Returns the CommandRecord otherwise
-        (state QUEUED, or REJECTED/EXPIRED if dedupe/expiry fired inline).
+        retained message, queue full, bad ttl/request id, shutdown, dedupe
+        conflict). Each such reject ALSO emits a terminal REJECTED result via
+        on_result (additive reporting only; the rejected request is never
+        queued or stored). Returns the CommandRecord otherwise (state QUEUED,
+        or EXPIRED if the ttl was already spent at enqueue).
         """
-        name = (name or "").strip().lower()
+        name = (name or "").strip().lower() if isinstance(name, str) else ""
+        try:
+            record, to_emit = self._submit(name, source, client_request_id, ttl, retained)
+        except DispatchError as err:
+            self._emit_reject(name, source, client_request_id, err)
+            raise
+        if to_emit is not None:
+            self._emit_result(to_emit)  # outside the lock
+        return record
+
+    def _submit(self, name, source, client_request_id, ttl, retained):
         if retained:
             raise DispatchError(
                 "retained command messages are refused before queueing "
@@ -171,6 +219,8 @@ class CommandDispatcher:
             )
         if name not in self._command_map:
             raise DispatchError(f"unknown command: {name!r}", http_status=400)
+        self._validate_ttl(ttl)
+        self._validate_request_id(client_request_id)
 
         now = self._clock()
         with self._lock:
@@ -180,7 +230,13 @@ class CommandDispatcher:
             if client_request_id is not None:
                 existing_id = self._dedupe.get(client_request_id)
                 if existing_id is not None and existing_id in self._records:
-                    return self._records[existing_id]
+                    existing = self._records[existing_id]
+                    if existing.request.name != name:
+                        raise DispatchError(
+                            "conflict: request_id already used for a different command",
+                            http_status=409,
+                        )
+                    return existing, None
 
             if len(self._queue) >= self._max_queue:
                 raise DispatchError(
@@ -189,7 +245,12 @@ class CommandDispatcher:
                 )
 
             req_id = str(uuid.uuid4())
-            expiry = now + ttl if ttl else (now + self._default_ttl if self._default_ttl else None)
+            if ttl is not None:
+                expiry = now + ttl
+            elif self._default_ttl:
+                expiry = now + self._default_ttl
+            else:
+                expiry = None
             request = CommandRequest(
                 id=req_id,
                 source=source,
@@ -200,14 +261,13 @@ class CommandDispatcher:
             )
             record = CommandRecord(request=request)
 
-            # Expiry check #1: at enqueue time (covers e.g. a caller-supplied
-            # ttl of 0, or a clock already past an explicit deadline).
+            # Expiry check #1: at enqueue time (e.g. caller-supplied ttl=0).
             if request.is_expired(now):
-                record.state = CommandState.EXPIRED
-                record.finished_at = now
+                self._finalize(record, CommandState.EXPIRED,
+                               {"ok": False, "reason": "expired before queueing"}, now)
                 self._records[req_id] = record
                 self._trim_records()
-                return record
+                return record, record
 
             self._records[req_id] = record
             self._queue.append(record)
@@ -217,7 +277,49 @@ class CommandDispatcher:
                     self._dedupe.popitem(last=False)
             self._trim_records()
             self._not_empty.notify_all()
-            return record
+            return record, None
+
+    @staticmethod
+    def _validate_ttl(ttl):
+        if ttl is None:
+            return
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)):
+            raise DispatchError("invalid ttl: must be a number of seconds", http_status=400)
+        # A huge int (e.g. a many-hundred-digit literal from a malicious/buggy
+        # JSON envelope) can make math.isfinite()/comparisons raise OverflowError
+        # instead of returning a clean bool. Treat any such value as invalid
+        # rather than letting the exception escape submit() with no terminal
+        # state ever recorded for the request.
+        try:
+            is_finite_nonneg = math.isfinite(ttl) and ttl >= 0
+            exceeds_max = ttl > MAX_TTL_SECONDS
+        except OverflowError:
+            raise DispatchError("invalid ttl: out of range", http_status=400)
+        if not is_finite_nonneg:
+            raise DispatchError("invalid ttl: must be finite and non-negative", http_status=400)
+        if exceeds_max:
+            raise DispatchError(f"invalid ttl: exceeds maximum of {MAX_TTL_SECONDS:g}s", http_status=400)
+
+    @staticmethod
+    def _validate_request_id(client_request_id):
+        if client_request_id is None:
+            return
+        if not isinstance(client_request_id, str) or not client_request_id:
+            raise DispatchError("invalid request_id: must be a non-empty string", http_status=400)
+        if len(client_request_id) > MAX_REQUEST_ID_LEN:
+            raise DispatchError(
+                f"invalid request_id: longer than {MAX_REQUEST_ID_LEN} characters", http_status=400)
+
+    def _emit_reject(self, name, source, client_request_id, err: DispatchError):
+        """Report a synchronous reject through on_result without touching
+        dispatcher state (the record is neither queued nor stored)."""
+        now = self._clock()
+        crid = client_request_id if isinstance(client_request_id, str) else None
+        request = CommandRequest(id=str(uuid.uuid4()), source=source or "unknown", name=name,
+                                 received_at=now, expiry=None, client_request_id=crid)
+        record = CommandRecord(request=request)
+        self._finalize(record, CommandState.REJECTED, {"ok": False, "reason": err.reason}, now)
+        self._emit_result(record)
 
     def cancel(self, request_id: str) -> bool:
         """Cancel a QUEUED (not yet started) command. Returns True if cancelled.
@@ -233,9 +335,10 @@ class CommandDispatcher:
                 self._queue.remove(record)
             except ValueError:
                 return False
-            record.state = CommandState.CANCELLED
-            record.finished_at = self._clock()
-            return True
+            self._finalize(record, CommandState.CANCELLED,
+                           {"ok": False, "reason": "cancelled before execution"}, self._clock())
+        self._emit_result(record)  # outside the lock
+        return True
 
     def get(self, request_id: str) -> Optional[CommandRecord]:
         with self._lock:
@@ -246,64 +349,87 @@ class CommandDispatcher:
             return len(self._queue)
 
     def _trim_records(self, keep: int = 512):
-        while len(self._records) > keep:
-            self._records.popitem(last=False)
+        """Evict oldest TERMINAL records only; QUEUED/EXECUTING are never
+        dropped (caller holds self._lock)."""
+        excess = len(self._records) - keep
+        if excess <= 0:
+            return
+        live = (CommandState.QUEUED, CommandState.EXECUTING)
+        victims = []
+        for rid, rec in self._records.items():
+            if rec.state not in live:
+                victims.append(rid)
+                if len(victims) >= excess:
+                    break
+        for rid in victims:
+            del self._records[rid]
+
+    @staticmethod
+    def _finalize(record: CommandRecord, state: CommandState, result: Dict[str, Any], now: float):
+        """Set a terminal state (caller holds self._lock for shared records)."""
+        record.result = result
+        record.state = state
+        record.finished_at = now
 
     # ---- worker ----------------------------------------------------------
     def _run(self):
         while True:
+            expired = None
             with self._lock:
                 while not self._queue and not self._shutdown:
                     self._not_empty.wait(timeout=1.0)
-                if self._shutdown and not self._queue:
+                if self._shutdown:
+                    # stop() already cancelled everything still queued; never
+                    # start a new physical send once shutdown is requested.
                     return
                 if not self._queue:
                     continue
                 record = self._queue.popleft()
 
                 now = self._clock()
-                # Expiry check #2: immediately before transmission. A command
-                # that sat in the queue past its deadline is NEVER executed.
+                # Expiry check #2: before handing to the executor. The
+                # authoritative check happens again inside the executor right
+                # before the physical send.
                 if record.request.is_expired(now):
-                    record.state = CommandState.EXPIRED
-                    record.finished_at = now
-                    self._emit_result(record)
-                    continue
+                    self._finalize(record, CommandState.EXPIRED,
+                                   {"ok": False, "reason": "expired in queue"}, now)
+                    expired = record
+                else:
+                    record.state = CommandState.EXECUTING
+                    record.started_at = now
 
-                if record.state == CommandState.CANCELLED:
-                    continue  # cancelled while sitting in the deque snapshot
-
-                record.state = CommandState.EXECUTING
-                record.started_at = now
+            if expired is not None:
+                self._emit_result(expired)  # outside the lock
+                continue
 
             # Executor runs OUTSIDE the dispatcher lock (it holds the serial
             # lock itself) so a slow/hung serial exchange cannot block new
             # submissions or expiry bookkeeping for unrelated commands.
             try:
                 result = self._executor(record.request)
-                with self._lock:
-                    record.result = result
-                    record.state = (
-                        CommandState.ACKNOWLEDGED if result.get("ok") else CommandState.REJECTED
-                    )
-                    record.finished_at = self._clock()
+                if result.get("expired_before_send"):
+                    state = CommandState.EXPIRED
+                elif result.get("cancelled_before_send"):
+                    state = CommandState.CANCELLED
+                elif result.get("ok"):
+                    state = CommandState.ACKNOWLEDGED
+                else:
+                    state = CommandState.REJECTED
             except TimeoutError as exc:
-                # Sent (or ambiguous whether sent) + no confirmed reply before
-                # our own timeout: outcome is UNKNOWN, never "success" and
-                # never auto-retried/resent.
-                with self._lock:
-                    record.result = {"ok": False, "reason": f"timeout: {exc}"}
-                    record.state = CommandState.UNKNOWN
-                    record.finished_at = self._clock()
+                # Sent (or ambiguous whether sent) + no confirmed reply:
+                # outcome is UNKNOWN, never "success", never auto-resent.
+                result = {"ok": False, "reason": f"timeout: {exc}"}
+                state = CommandState.UNKNOWN
             except Exception as exc:  # pragma: no cover - defensive
-                with self._lock:
-                    record.result = {"ok": False, "reason": f"error: {exc}"}
-                    record.state = CommandState.REJECTED
-                    record.finished_at = self._clock()
+                result = {"ok": False, "reason": f"error: {exc}"}
+                state = CommandState.REJECTED
+            with self._lock:
+                self._finalize(record, state, result, self._clock())
 
-            self._emit_result(record)
+            self._emit_result(record)  # outside the lock
 
     def _emit_result(self, record: CommandRecord):
+        """Invoke on_result. Must NEVER be called with self._lock held."""
         if self._on_result:
             try:
                 self._on_result(record)
