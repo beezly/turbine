@@ -269,22 +269,24 @@ class TestMnet(unittest.TestCase):
         # Mock serial read responses
         header_data = struct.pack('!BBBHB', 0x01, 0x02, 0x01, 0x0c28, 2)
         data = b'\x9c\x43'
-        tail_data = struct.pack('!HB', 0x1234, 0x04)
-        
+        crc = Calculator(Crc16.XMODEM).checksum(header_data[1:] + data)
+        tail_data = struct.pack('!HB', crc, 0x04)
+
         self.mock_serial.read.side_effect = [header_data, data, tail_data]
-        
+
         packet = mnet_instance.read_packet()
-        
+
         self.assertIsInstance(packet, Mnet.MnetPacket)
         self.assertEqual(packet.data, data)
-        self.assertEqual(packet.crc, 0x1234)
+        self.assertEqual(packet.crc, crc)
         
     def test_read_packet_no_data(self):
         """Test reading packet with no data payload."""
         mnet_instance = Mnet(self.mock_serial)
         
         header_data = struct.pack('!BBBHB', 0x01, 0x02, 0x01, 0x0c28, 0)
-        tail_data = struct.pack('!HB', 0x1234, 0x04)
+        crc = Calculator(Crc16.XMODEM).checksum(header_data[1:])
+        tail_data = struct.pack('!HB', crc, 0x04)
         
         self.mock_serial.read.side_effect = [header_data, tail_data]
         

@@ -7,6 +7,7 @@ Monitors wind turbine data via Mnet protocol and publishes to MQTT.
 
 import json
 import logging
+import struct
 import time
 import threading
 import traceback
@@ -22,6 +23,10 @@ from flask_socketio import SocketIO, emit
 import mnet
 
 
+class NotLoggedInError(RuntimeError):
+    """Data collection was attempted while not logged in to the controller."""
+
+
 class TurbineMonitor:
     """Wind turbine monitoring and MQTT publishing."""
 
@@ -29,8 +34,16 @@ class TurbineMonitor:
     DESTINATION = b'\x02'
     POLL_INTERVAL = 1.0
     ERROR_RETRY_DELAY = 10.0
+    MQTT_PUBLISH_TIMEOUT = 5.0  # Max seconds to wait for a publish to be acknowledged
     INTER_REQUEST_DELAY = 0.1  # Delay between serial requests
     TIME_SYNC_INTERVAL = 14400  # Sync controller time every 4 hours (in seconds)
+    TIME_SYNC_RETRY_INITIAL = 60.0  # First retry delay after a failed time sync
+    TIME_SYNC_RETRY_MAX = 3600.0    # Backoff ceiling
+
+    # Errors from a corrupt/short/misaligned reply: the stream can't be trusted,
+    # so these take the reconnect path (like connection errors) rather than a blind retry.
+    PROTOCOL_ERRORS = (struct.error, ValueError, IndexError, UnicodeDecodeError,
+                       mnet.MnetFrameError)
 
     # Control commands (require the standard/control login; see _execute_pending_command)
     COMMAND_MAP = {
@@ -68,6 +81,9 @@ class TurbineMonitor:
         self.login_state = {'mode': 'hidden', 'detail': 'monitoring (read-only)',
                             'control_available': bool(control_password), 'ts': None}
         self.last_time_sync: Optional[datetime] = None
+        self._time_sync_backoff = self.TIME_SYNC_RETRY_INITIAL
+        self._next_time_sync_attempt = 0.0  # time.monotonic() deadline
+        self.logged_in = False  # True only between a successful login and the next reconnect
         self.logger = self._setup_logging()
 
         # Monitoring data
@@ -312,7 +328,7 @@ class TurbineMonitor:
 
         @self.socketio.on('connect')
         def handle_connect():
-            emit('status', self.status)
+            emit('status', self._status_payload())
             emit('data', self.latest_data)
             emit('login_state', self.login_state)
         
@@ -406,10 +422,31 @@ class TurbineMonitor:
         """Setup MQTT client."""
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id='turbine_mqtt', userdata=self)
         client.on_message = self._handle_command_message
-        client.connect(self.mqtt_host)
+        client.on_connect = self._on_mqtt_connect
+        client.on_disconnect = self._on_mqtt_disconnect
+        # Non-blocking: an unreachable broker must not stop startup; the network
+        # loop connects (and reconnects) in the background.
+        client.connect_async(self.mqtt_host)
         client.loop_start()
         return client
-    
+
+    def _on_mqtt_connect(self, client, userdata, flags, reason_code, properties=None):
+        """(Re)subscribe on every connect; subscriptions don't survive a broker restart."""
+        if reason_code.is_failure:
+            self.logger.error(f"MQTT connect refused: {reason_code}")
+            return
+        self.logger.info("MQTT connected")
+        serial_number = getattr(self, 'serial_number', None)
+        if serial_number is None:
+            return  # _setup_command_subscription() covers the very first connect
+        command_topic = f"{self.TOPIC_PREFIX}{serial_number}/command"
+        client.subscribe(command_topic)
+        self.logger.info(f"Subscribed to command topic: {command_topic}")
+
+    def _on_mqtt_disconnect(self, client, userdata, disconnect_flags, reason_code, properties=None):
+        """Log broker disconnects; paho's loop handles the reconnect itself."""
+        self.logger.warning(f"MQTT disconnected: {reason_code}")
+
     def _setup_command_subscription(self):
         """Setup MQTT command topic subscription."""
         command_topic = f"{self.TOPIC_PREFIX}{self.serial_number}/command"
@@ -526,10 +563,15 @@ class TurbineMonitor:
     def _login_to_turbine(self):
         """Perform the hidden (read-only) login used for monitoring."""
         with self.serial_lock:
-            self._clear_serial_buffers()
-            self._log_serial('TX', 'LOGIN')
-            self.mnet_client.login(self.DESTINATION)
-            time.sleep(self.INTER_REQUEST_DELAY)
+            self._login_locked()
+
+    def _login_locked(self):
+        """Hidden login; caller must hold serial_lock."""
+        self._clear_serial_buffers()
+        self._log_serial('TX', 'LOGIN')
+        self.mnet_client.login(self.DESTINATION)
+        self.logged_in = True
+        time.sleep(self.INTER_REQUEST_DELAY)
         self._set_login_state('hidden', 'monitoring (read-only)')
 
     def _execute_pending_command(self):
@@ -587,19 +629,33 @@ class TurbineMonitor:
         now = datetime.now()
         if (self.last_time_sync is None or
             (now - self.last_time_sync).total_seconds() >= self.TIME_SYNC_INTERVAL):
+            if time.monotonic() < self._next_time_sync_attempt:
+                return  # backing off after a failure
             with self.serial_lock:
                 try:
                     self._clear_serial_buffers()
                     self.logger.info("Syncing controller time to UTC")
                     self.mnet_client.set_controller_time(self.DESTINATION)
                     self.last_time_sync = now
+                    self._time_sync_backoff = self.TIME_SYNC_RETRY_INITIAL
                     self.logger.info("Controller time synced successfully")
                 except Exception as e:
                     self.logger.error(f"Failed to sync controller time: {e}")
                     self.logger.error(traceback.format_exc())
+                    self._next_time_sync_attempt = time.monotonic() + self._time_sync_backoff
+                    self.logger.info(f"Next time sync attempt in {self._time_sync_backoff:.0f}s")
+                    self._time_sync_backoff = min(self._time_sync_backoff * 2,
+                                                  self.TIME_SYNC_RETRY_MAX)
 
     def _collect_turbine_data(self) -> Dict[str, Any]:
-        """Collect all turbine data using single multiple request."""
+        """Collect all turbine data using single multiple request.
+        
+        Raises:
+            NotLoggedInError: (a RuntimeError) if not logged in
+        """
+        if not self.logged_in:
+            raise NotLoggedInError("Cannot collect data: not logged in to controller")
+        
         # Get remote display screen
         with self.serial_lock:
             try:
@@ -607,6 +663,11 @@ class TurbineMonitor:
                 # Convert to ASCII, format as 18-char lines (matches controller LCD)
                 display_text = ''.join(chr(b) if 32 <= b < 127 else ' ' for b in remote_display)
                 display_lines = [display_text[i:i+18] for i in range(0, len(display_text), 18)]
+            except (mnet.MnetFrameError, mnet.MnetDecodeError) as e:
+                # The stream can't be trusted after a bad frame: surface it so run()
+                # reconnects, rather than publishing data with an empty display.
+                self.logger.error(f"Protocol error reading remote display: {e}")
+                raise
             except Exception as e:
                 self.logger.warning(f"Failed to get remote display: {e}")
                 display_lines = []
@@ -679,16 +740,35 @@ class TurbineMonitor:
         payload = json.dumps(serializable_data)
         
         result = self.mqtt_client.publish(topic, payload)
-        result.wait_for_publish()
-        
-        self._log_mqtt('TX', topic, payload)
+        if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            try:
+                result.wait_for_publish(timeout=self.MQTT_PUBLISH_TIMEOUT)
+            except (ValueError, RuntimeError) as e:
+                self.logger.warning(f"MQTT publish not confirmed: {e}")
+            else:
+                if result.is_published():
+                    self._log_mqtt('TX', topic, payload)
+                else:
+                    # Timed out (e.g. broker offline): paho keeps the message queued
+                    self.logger.warning(
+                        f"MQTT publish not confirmed within {self.MQTT_PUBLISH_TIMEOUT}s; continuing")
+        else:
+            # Broker down/queue full: wait_for_publish() would raise or hang. The
+            # turbine data is still good, so keep the web UI live and carry on.
+            self.logger.warning(f"MQTT publish failed rc={result.rc}: {mqtt.error_string(result.rc)}")
+
         self.latest_data = serializable_data
-        self.status['last_update'] = datetime.now().isoformat()
+        self.status['last_update'] = datetime.now(timezone.utc).isoformat()
         self.status['connected'] = True
         
         self.socketio.emit('data', serializable_data)
-        self.socketio.emit('status', self.status)
+        self.socketio.emit('status', self._status_payload())
     
+    def _status_payload(self) -> Dict[str, Any]:
+        """Status for the web UI: last_update is UTC-aware, and server_time is stamped
+        at emit so the browser can compute data age without trusting its own clock."""
+        return {**self.status, 'server_time': datetime.now(timezone.utc).isoformat()}
+
     def run(self):
         """Main monitoring loop."""
         self.logger.info("Starting turbine monitor")
@@ -701,11 +781,13 @@ class TurbineMonitor:
         web_thread.start()
         self.logger.info(f"Web interface started on port {self.web_port}")
         
-        # Login to turbine
-        self._login_to_turbine()
-
         while True:
             try:
+                # Log in first (startup, or after a failed reconnect). Inside the try so
+                # a failure here takes the same retry/reconnect path as any other error.
+                if not self.logged_in:
+                    self._login_to_turbine()
+
                 # Execute any pending commands
                 self._execute_pending_command()
 
@@ -718,53 +800,75 @@ class TurbineMonitor:
                 
                 time.sleep(self.POLL_INTERVAL)
                 
-            except (BrokenPipeError, ConnectionError, OSError) as e:
-                self.logger.error(f"Connection error: {e}")
-                self.status['connected'] = False
-                self.socketio.emit('status', self.status)
-                time.sleep(self.ERROR_RETRY_DELAY)
-
-                # Attempt reconnection
+            except NotLoggedInError as e:
+                # Not logged in (e.g. a prior reconnect failed part-way): retrying
+                # collection can never succeed, so log in again before the next poll.
+                self.logger.warning(f"{e}; attempting re-login")
                 try:
-                    self._reconnect_device()
-                except Exception as reconnect_error:
-                    self.logger.error(f"Reconnection failed: {reconnect_error}")
+                    self._login_to_turbine()
+                except (BrokenPipeError, ConnectionError, OSError) + self.PROTOCOL_ERRORS as login_error:
+                    self._recover_connection(login_error)
+                except Exception as login_error:
+                    self.logger.error(f"Re-login failed: {login_error}")
                     self.logger.error(traceback.format_exc())
+                    time.sleep(self.ERROR_RETRY_DELAY)
+
+            except (BrokenPipeError, ConnectionError, OSError) + self.PROTOCOL_ERRORS as e:
+                self._recover_connection(e)
 
             except Exception as e:
                 self.logger.error(f"Monitor loop error: {e}")
                 self.logger.error(traceback.format_exc())
                 self.status['connected'] = False
-                self.socketio.emit('status', self.status)
+                self.socketio.emit('status', self._status_payload())
                 time.sleep(self.ERROR_RETRY_DELAY)
     
+    def _recover_connection(self, error: Exception):
+        """Log a connection/protocol error, back off, then reconnect and re-login."""
+        self.logger.error(f"Connection/protocol error ({type(error).__name__}): {error}")
+        self.status['connected'] = False
+        self.socketio.emit('status', self._status_payload())
+        time.sleep(self.ERROR_RETRY_DELAY)
+
+        # Attempt reconnection
+        try:
+            self._reconnect_device()
+        except Exception as reconnect_error:
+            self.logger.error(f"Reconnection failed: {reconnect_error}")
+            self.logger.error(traceback.format_exc())
+
     def _reconnect_device(self):
         """Reconnect to the serial/network device after connection loss."""
         self.logger.info("Attempting to reconnect to turbine...")
 
-        # Reconnect if NetworkSerial, otherwise recreate the device
-        if hasattr(self.serial_device, 'reconnect'):
-            self.serial_device.reconnect()
-        else:
-            # For serial devices, close and recreate
-            try:
-                self.serial_device.close()
-            except Exception:
-                pass
-            self.serial_device = self._create_device(self.connection)
-            self.mnet_client.device = self.serial_device
+        # Hold the lock for the whole sequence so web/API threads can't talk to a
+        # half-reset client (no serial number, not logged in) mid-reconnect.
+        with self.serial_lock:
+            self.logged_in = False
 
-        # Reset mnet_client state so serial number is re-fetched
-        self.mnet_client.serial = None
-        self.mnet_client.encoded_serial = None
-        self.mnet_client._alarm_description_cache.clear()
+            # Reconnect if NetworkSerial, otherwise recreate the device
+            if hasattr(self.serial_device, 'reconnect'):
+                self.serial_device.reconnect()
+            else:
+                # For serial devices, close and recreate
+                try:
+                    self.serial_device.close()
+                except Exception:
+                    pass
+                self.serial_device = self._create_device(self.connection)
+                self.mnet_client.device = self.serial_device
 
-        # Re-fetch serial number and re-login
-        self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
-        self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
-        self.logger.info(f"Reconnected to turbine serial: {self.serial_number}")
+            # Reset mnet_client state so serial number is re-fetched
+            self.mnet_client.serial = None
+            self.mnet_client.encoded_serial = None
+            self.mnet_client._alarm_description_cache.clear()
 
-        self._login_to_turbine()
+            # Re-fetch serial number and re-login
+            self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
+            self.encoded_serial = self.mnet_client.encode_serial(serial_bytes)
+            self.logger.info(f"Reconnected to turbine serial: {self.serial_number}")
+
+            self._login_locked()
         self.logger.info("Reconnection successful")
 
     def close(self):

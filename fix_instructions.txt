@@ -1,0 +1,42 @@
+BACKEND PROTOCOL VALIDATION FIXES - Claude Code Instructions
+
+TASK: Complete the 4 remaining protocol validation gaps before UI redesign
+
+GAP A: Add destination address validation in send_packet()
+FILE: mnet.py, method send_packet (currently around line 300-319)
+CHANGE: After response = self.read_packet(), validate response.source == destination
+ACTION: Raise MnetDecodeError if source mismatch
+
+GAP B: Add logged_in flag check to request methods
+FILE: mnet.py, method request_data (around line 732)
+ACTION: Add check at start: if not self.logged_in: raise RuntimeError("not logged in")
+
+FILE: mnet.py, method request_multiple_data (around line 756)
+ACTION: Same check
+
+GAP C: Add test cases for these new validations
+FILE: tests/test_protocol_recovery.py
+ACTION: Add TestTransactionIdentityValidation class with:
+  - test_send_packet_validates_response_source
+  - test_request_data_checks_logged_in_flag
+  - test_request_multiple_data_checks_logged_in_flag
+
+WORKFLOW:
+1. Open mnet.py in code editor
+2. Implement GAP A in send_packet()
+3. Implement GAP B in request_data()
+4. Implement GAP B in request_multiple_data()
+5. Save mnet.py
+6. Open tests/test_protocol_recovery.py
+7. Add TestTransactionIdentityValidation class with tests
+8. Run tests: pytest tests/ -v
+9. All tests must pass
+10. Commit with message "Add protocol transaction identity validation"
+
+IMPORTANT:
+- Do NOT modify turbinepi or any hardware
+- Keep within Mnet class scope
+- Raise MnetDecodeError for protocol errors
+- Raise RuntimeError for state errors (logged_in)
+- Mock device in tests, no network access
+- Tests must work offline with mock objects

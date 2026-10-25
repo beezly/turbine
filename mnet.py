@@ -11,6 +11,20 @@ from typing import Tuple, List, Union, Optional, Iterator, NamedTuple, Dict
 from crc import Calculator, Crc16
 
 
+class MnetFrameError(Exception):
+    """A received frame was short, mis-delimited or failed its CRC check."""
+
+
+class MnetDecodeError(ValueError):
+    """A well-framed reply could not be decoded or did not match its request."""
+
+
+class MnetLoginRejectedError(MnetDecodeError):
+    """The controller returned the documented "Remote not logged in" (0x1390)
+    reply to a login attempt: a valid, well-formed negative acknowledgement,
+    not a successful login and not frame/transport corruption."""
+
+
 class Event(NamedTuple):
     """A turbine event from the event stack."""
     index: int
@@ -173,6 +187,41 @@ class Mnet:
     REQ_LOGIN = b'\x13\xa1'          # hidden login ("Remote hidden login"); password not validated -> level 0
     REQ_LOGIN_STANDARD = b'\x13\x8e'  # standard login ("Remote login"); carries + validates the Turbine Password
 
+    # "Remote not logged in" (5008 / 0x1390): documented in docs/MNET.md as the
+    # controller's reply when a login attempt is rejected. It is a valid,
+    # well-formed negative reply, not an echo of the login request type.
+    REPLY_NOT_LOGGED_IN = b'\x13\x90'
+
+    # Request packet type -> set of documented valid reply packet types.
+    #
+    # The Mnet protocol does NOT universally echo request.packet_type back on
+    # the reply (see docs/MNET.md "Packet Type Codes" and "Message Sequence
+    # Examples"): most request/reply pairs use *different* codes (e.g.
+    # Request data 0x0C28 -> Reply data 0x0C29). Logins are a documented
+    # exception: a successful login reply echoes the login request's own
+    # type (0x138E or 0x13A1); a rejected login instead returns the shared
+    # "Remote not logged in" code 0x1390.
+    #
+    # Request types with NO documented reply code in docs/MNET.md (currently
+    # only REQ_COMMAND / 0x0C32, whose only caller logs whatever reply type
+    # comes back without asserting one) are intentionally left out of this
+    # map; send_packet falls back to requiring an exact echo for those so an
+    # unexpected reply type still raises instead of being silently invented.
+    # 0x0BEA (Acknowledge alarm) is included below even though no current
+    # caller in this file sends that request type, for completeness against
+    # docs/MNET.md and so a future caller gets correct validation for free.
+    REQUEST_RESPONSE_TYPES: Dict[bytes, frozenset] = {
+        REQ_DATA: frozenset({b'\x0c\x29'}),             # Request data -> Reply data
+        REQ_MULTIPLE_DATA: frozenset({b'\x0c\x2b'}),     # Request multiple data -> Reply multiple data
+        REQ_WRITE_DATA: frozenset({b'\x0c\x2d'}),        # Request write data -> Reply write data
+        REQ_SERIAL_NUMBER: frozenset({b'\x0c\x2f'}),     # Request serial no. -> Reply serial no.
+        b'\x0c\x04': frozenset({b'\x0c\x06'}),          # Display command type 2 -> 0xc06
+        b'\x0c\x05': frozenset({b'\x0c\x07'}),          # Display command type 3 -> 0xc07
+        b'\x0b\xea': frozenset({b'\x00\x01'}),          # Acknowledge alarm -> Reply Acknowledge (no current caller uses this request type)
+        REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN}),              # hidden login: echo on success, 0x1390 on rejection
+        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN}),  # standard login: echo on success, 0x1390 on rejection
+    }
+
     # Login constants
     LOGIN_131_GAIA_WIND = b'\x31\x33\x31\x20\x66\x6b\x59\x75\x29\x29\x31\x32\x32\x32\x31\x51\x51\x61\x61\x00'
     # Payload offset 0x2a (big-endian dword). WPMS builder 0x59D2 fills this with the HASP
@@ -289,8 +338,35 @@ class Mnet:
         """Create an Mnet packet."""
         return MnetPacket(destination, self.id, packet_type, len(data), data)
     
-    def send_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
-        """Send packet and return response."""
+    def send_packet(self, destination: bytes, packet_type: bytes, data: bytes,
+                     expected_types: Optional[frozenset] = None) -> MnetPacket:
+        """Send packet and return response.
+
+        Validates the reply's identity: it must come from the device we
+        addressed, be addressed back to us, and use a packet type that is a
+        documented valid reply to this specific request type.
+
+        Per docs/MNET.md, the Mnet protocol does NOT universally echo the
+        request's packet type back on the reply -- most request/reply pairs
+        use distinct codes (e.g. Request data 0x0C28 -> Reply data 0x0C29).
+        The expected reply type set is resolved as follows:
+
+        1. ``expected_types`` if the caller passes one explicitly (lets a
+           caller override/narrow for a transaction-specific case).
+        2. ``REQUEST_RESPONSE_TYPES[packet_type]`` if the request type has a
+           documented mapping.
+        3. Otherwise, exact echo of ``packet_type`` -- this is a conservative
+           fallback for request types with no documented reply code (not an
+           assumption that echo is correct; any other reply is still
+           rejected).
+
+        Raises:
+            MnetLoginRejectedError: a login request got the documented
+                "Remote not logged in" (0x1390) reply -- a valid, well-formed
+                rejection, not a successful login and not corruption.
+            MnetDecodeError: the response source, destination, or packet type
+                does not match the request / documented mapping.
+        """
         packet = self.create_packet(destination, packet_type, data)
         packet_bytes = bytes(packet)
         
@@ -301,6 +377,40 @@ class Mnet:
         self.device.write(packet_bytes)
         response = self.read_packet()
         
+        # Validate response came from expected source (the device we're talking to)
+        if response.source != destination:
+            raise MnetDecodeError(
+                f"response source mismatch: expected 0x{destination.hex()}, "
+                f"got 0x{response.source.hex()}")
+
+        # Validate response is addressed back to us
+        if response.destination != self.id:
+            raise MnetDecodeError(
+                f"response destination mismatch: expected 0x{self.id.hex()}, "
+                f"got 0x{response.destination.hex()}")
+
+        # Resolve the documented set of valid reply types for this request.
+        if expected_types is not None:
+            valid_types = expected_types
+        else:
+            valid_types = self.REQUEST_RESPONSE_TYPES.get(packet_type, frozenset({packet_type}))
+
+        if response.packet_type not in valid_types:
+            raise MnetDecodeError(
+                f"response packet type mismatch: expected one of "
+                f"{{{', '.join('0x' + t.hex() for t in sorted(valid_types))}}}, "
+                f"got 0x{response.packet_type.hex()}")
+
+        # A login request that got the documented "not logged in" rejection
+        # reply is a valid negative, not a successful login: surface it as a
+        # distinct, specific error rather than letting callers mistake the
+        # well-formed rejection reply for a successful login response.
+        if (packet_type in (self.REQ_LOGIN, self.REQ_LOGIN_STANDARD)
+                and response.packet_type == self.REPLY_NOT_LOGGED_IN):
+            raise MnetLoginRejectedError(
+                f"login rejected: controller replied 0x{self.REPLY_NOT_LOGGED_IN.hex()} "
+                f"(Remote not logged in) to request 0x{packet_type.hex()}")
+
         # Log incoming response
         if self._log_callback:
             response_bytes = bytes(response)
@@ -308,16 +418,47 @@ class Mnet:
         
         return response
     
+    def _read_exact(self, size: int, what: str) -> bytes:
+        """Read exactly size bytes, looping over partial reads.
+
+        TCP and serial reads may return fewer bytes than requested. An empty read
+        means EOF, a closed connection or a serial timeout, so give up rather than spin.
+
+        Raises:
+            MnetFrameError: the device returned no data before size bytes arrived.
+        """
+        buf = b''
+        while len(buf) < size:
+            chunk = self.device.read(size - len(buf))
+            if not chunk:
+                raise MnetFrameError(
+                    f"short {what} read: {len(buf)} of {size} bytes (connection closed or timed out)")
+            buf += chunk
+        return buf
+
     def read_packet(self) -> MnetPacket:
-        """Read packet from device."""
-        header = self.device.read(6)
+        """Read and validate a packet from the device.
+
+        Raises:
+            MnetFrameError: short read, bad SOH/EOT delimiter, or CRC mismatch.
+        """
+        header = self._read_exact(6, 'header')
         soh, destination, source, packet_type, data_len = struct.unpack('!BBBHB', header)
-        
-        data = self.device.read(data_len) if data_len > 0 else b''
-        
-        tail = self.device.read(3)
+        if soh != self.SOH[0]:
+            raise MnetFrameError(f"bad SOH: 0x{soh:02x}")
+
+        data = self._read_exact(data_len, 'data') if data_len > 0 else b''
+
+        tail = self._read_exact(3, 'tail')
         crc, eot = struct.unpack('!HB', tail)
-        
+        if eot != self.EOT[0]:
+            raise MnetFrameError(f"bad EOT: 0x{eot:02x}")
+
+        # CRC covers dst..data exactly as received (data is already wire-escaped)
+        expected_crc = Calculator(Crc16.XMODEM).checksum(header[1:] + data)
+        if crc != expected_crc:
+            raise MnetFrameError(f"CRC mismatch: got 0x{crc:04x}, expected 0x{expected_crc:04x}")
+
         return MnetPacket(
             destination.to_bytes(1, byteorder='big'),
             source.to_bytes(1, byteorder='big'),
@@ -502,6 +643,8 @@ class Mnet:
                 value = float(raw_data) * conversion_value if conversion_value != 0 else float(raw_data)
             case 0x4:
                 value = float(raw_data) * pow(10, conversion_value)
+            case _:
+                raise ValueError(f"Unknown conversion type: {conversion_type}")
 
         # Convert to datetime only if data_type is 6 AND data_id is not in the exclusion set
         if data_type == 6 and data_id not in self.DATA_IDS_NOT_TIMESTAMP:
@@ -553,21 +696,40 @@ class Mnet:
         
         return converter()
     
-    def decode_multiple_data(self, data_in: bytes) -> List[Tuple[int, int, Tuple[int, Union[float, str, None]]]]:
-        """Decode multiple data elements from response."""
+    def decode_multiple_data(self, data_in: bytes,
+                             requests: Optional[List[Tuple[bytes, int]]] = None
+                             ) -> List[Tuple[int, int, Tuple[int, Union[float, str, None]]]]:
+        """Decode multiple data elements from response.
+
+        Args:
+            data_in: Decrypted multi-data reply.
+            requests: Optional (data_id bytes, sub_id) list that was sent. When given,
+                the reply must contain exactly one element per request, in order, with
+                matching (mainid, subid) -- otherwise a truncated/reordered reply would
+                silently shift values onto the wrong fields.
+
+        Raises:
+            MnetDecodeError: truncated reply, element-count or (mainid, subid) mismatch.
+        """
         if not data_in:
+            if requests:
+                raise MnetDecodeError(f"empty reply, expected {len(requests)} elements")
             return []
 
         num_elements = data_in[0]
         pos = 1
         results = []
 
-        for _ in range(num_elements):
+        for i in range(num_elements):
             if pos + 9 > len(data_in):
-                break
+                raise MnetDecodeError(
+                    f"truncated reply: header of element {i} of {num_elements} incomplete")
 
             header = data_in[pos:pos+9]
             mainid, subid, _, _, _, length = struct.unpack("!HHBBHB", header)
+            if pos + 9 + length > len(data_in):
+                raise MnetDecodeError(
+                    f"truncated reply: element {i} of {num_elements} needs {length} data bytes")
 
             next_data = data_in[pos+4:pos+9+length]
             # Pass mainid to decode_data for proper type handling
@@ -575,6 +737,16 @@ class Mnet:
             results.append((mainid, subid, decoded))
 
             pos += 9 + length
+
+        if requests is not None:
+            if len(results) != len(requests):
+                raise MnetDecodeError(
+                    f"expected {len(requests)} elements, reply contains {len(results)}")
+            for i, ((req_id, req_sub), (mainid, subid, _)) in enumerate(zip(requests, results)):
+                if (int.from_bytes(req_id, 'big'), req_sub) != (mainid, subid):
+                    raise MnetDecodeError(
+                        f"element {i} mismatch: requested {req_id.hex()}:{req_sub}, "
+                        f"got {mainid:04x}:{subid}")
 
         return results
     
@@ -663,8 +835,8 @@ class Mnet:
         #     abbreviated_ascii = ascii_data[:16] + ('...' if len(ascii_data) > 16 else '')
         #     self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {abbreviated_ascii}')
         
-        results = self.decode_multiple_data(decoded_data)
-        
+        results = self.decode_multiple_data(decoded_data, requests=datasubids)
+
         # Log debug responses
         if self._debug_callback:
             for i, (mainid, subid, (data_type, value)) in enumerate(results):

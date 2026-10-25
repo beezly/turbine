@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<!-- NOT SERVED: Flask renders templates/index.html (see index() in turbine_monitor.py).
+     This alternate layout shows live socket data only; it has no demo/mock mode. -->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#050a12">
+    <title>Wind Turbine Monitor</title>
+    
+    <!-- Socket.io -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.4/socket.io.js"></script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            /* Palette */
+            --bg-base: #050a12;
+            --bg-surface: #0f1e37;
+            --bg-card: #172842;
+            --bg-elevated: #1e3a52;
+            
+            /* States - High Contrast */
+            --state-connected: #10b981;
+            --state-stale: #f59e0b;
+            --state-loading: #3b82f6;
+            --state-unavailable: #ef4444;
+            
+            /* Text - WCAG AA Contrast */
+            --text-primary: #f0f4f8;    /* 7.4:1 on base */
+            --text-secondary: #b4bcc8;   /* 5.2:1 on base */
+            --text-muted: #7c8a9e;      /* 4.5:1 on base */
+            
+            /* Borders & Accents */
+            --border-subtle: rgba(59, 130, 246, 0.1);
+            --border-active: rgba(59, 130, 246, 0.3);
+            
+            /* Transitions (respect prefers-reduced-motion) */
+            --transition-fast: 150ms ease-out;
+            --transition-normal: 300ms ease-out;
+            
+            font-size: 16px;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            :root {
+                --transition-fast: 0ms;
+                --transition-normal: 0ms;
+            }
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--bg-base);
+            color: var(--text-primary);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Background */
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(ellipse 80% 50% at 20% -20%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(16, 185, 129, 0.06) 0%, transparent 50%);
+            z-index: -2;
+            pointer-events: none;
+        }
+
+        /* Grid overlay */
+        body::after {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background-image:
+                linear-gradient(rgba(59, 130, 246, 0.02) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(59, 130, 246, 0.02) 1px, transparent 1px);
+            background-size: 60px 60px;
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        /* Container */
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+        }
+
+        /* ===== HEADER ===== */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 2rem;
+            padding: 1.5rem 0;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid var(--border-subtle);
+            flex-wrap: wrap;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex: 1;
+            min-width: 0;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo::before {
+            content: '⚡';
+            font-size: 1.75rem;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 8px;
+            font-size: 0.875rem;
+            white-space: nowrap;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--state-unavailable);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .status-dot { animation: none; }
+        }
+
+        .status-dot.connected { background: var(--state-connected); }
+        .status-dot.stale { background: var(--state-stale); }
+        .status-dot.loading { background: var(--state-loading); }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .header-right { width: 100%; }
+        }
+
+        /* ===== MAIN LAYOUT ===== */
+        .main-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        @media (min-width: 768px) {
+            .main-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+
+        @media (min-width: 1200px) {
+            .main-grid { grid-template-columns: repeat(4, 1fr); }
+        }
+
+        /* ===== HERO METRICS ===== */
+        .hero-section {
+            grid-column: 1 / -1;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .hero-metric {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem 1rem;
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            text-align: center;
+        }
+
+        .hero-metric:hover {
+            border-color: var(--border-active);
+            background: var(--bg-card);
+            transition: all var(--transition-fast);
+        }
+
+        .hero-label {
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .hero-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            font-family: 'JetBrains Mono', monospace;
+            line-height: 1;
+        }
+
+        .hero-unit {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-top: 0.25rem;
+        }
+
+        /* ===== CARDS ===== */
+        .card {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            padding: 1.5rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: all var(--transition-fast);
+        }
+
+        .card:hover {
+            border-color: var(--border-active);
+            background: var(--bg-elevated);
+        }
+
+        .card.stale {
+            opacity: 0.7;
+            border-color: var(--state-stale);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+
+        .card-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .card-icon {
+            font-size: 1.5rem;
+            opacity: 0.6;
+        }
+
+        /* Metrics Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 1rem;
+        }
+
+        .metric {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .metric-label {
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+        }
+
+        .metric-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            color: var(--text-primary);
+        }
+
+        .metric-value.loading {
+            color: var(--text-muted);
+        }
+
+        /* State Indicators */
+        .state-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.25rem 0.75rem;
+            background: rgba(255, 0, 0, 0.1);
+            border: 1px solid var(--state-unavailable);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .state-badge.unavailable { border-color: var(--state-unavailable); background: rgba(239, 68, 68, 0.1); }
+        .state-badge.stale { border-color: var(--state-stale); background: rgba(245, 158, 11, 0.1); }
+        .state-badge.loading { border-color: var(--state-loading); background: rgba(59, 130, 246, 0.1); }
+        .state-badge.connected { border-color: var(--state-connected); background: rgba(16, 185, 129, 0.1); }
+
+        /* ===== CONTROLS SECTION ===== */
+        .controls-section {
+            grid-column: 1 / -1;
+            padding: 1.5rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: 12px;
+        }
+
+        .controls-header {
+            font-size: 0.875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 0.75rem;
+        }
+
+        /* ===== BUTTONS ===== */
+        .button {
+            padding: 0.75rem 1.5rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all var(--transition-fast);
+            min-height: 44px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            gap: 0.5rem;
+        }
+
+        .button:focus-visible {
+            outline: 2px solid var(--state-loading);
+            outline-offset: 2px;
+        }
+
+        .button:active {
+            transform: scale(0.98);
+        }
+
+        .button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .button-primary {
+            background: var(--state-connected);
+            color: white;
+        }
+
+        .button-primary:hover:not(:disabled) {
+            background: #059669;
+        }
+
+        .button-danger {
+            background: var(--state-unavailable);
+            color: white;
+        }
+
+        .button-danger:hover:not(:disabled) {
+            background: #dc2626;
+        }
+
+        .button-secondary {
+            background: var(--bg-surface);
+            color: var(--text-primary);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .button-secondary:hover:not(:disabled) {
+            border-color: var(--border-active);
+        }
+
+        /* ===== RESPONSIVE ===== */
+        @media (max-width: 768px) {
+            .hero-value { font-size: 2rem; }
+            .controls-grid { grid-template-columns: repeat(auto-fit, minmax(80px, 1fr)); }
+            .button { padding: 0.5rem 1rem; font-size: 0.75rem; }
+        }
+
+        /* ===== UTILITIES ===== */
+        .hidden { display: none !important; }
+        .text-muted { color: var(--text-muted); }
+        .text-secondary { color: var(--text-secondary); }
+
+        /* Accessibility */
+        @media (prefers-reduced-motion: reduce) {
+            * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+        }
+
+        @media (prefers-contrast: more) {
+            :root {
+                --text-secondary: #cad1db;
+                --border-subtle: rgba(59, 130, 246, 0.2);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo">Wind Monitor</div>
+                <div class="status-indicator">
+                    <div class="status-dot loading" id="statusDot"></div>
+                    <span id="statusText">Connecting…</span>
+                </div>
+            </div>
+            <div class="header-right">
+                <div style="font-size: 0.875rem; color: var(--text-muted);">
+                    Updated: <span id="lastUpdate">--:--</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-grid">
+            <!-- Hero Metrics -->
+            <section class="hero-section">
+                <div class="hero-metric">
+                    <div class="hero-label">Wind Speed</div>
+                    <div class="hero-value" id="windSpeed">--</div>
+                    <div class="hero-unit">m/s</div>
+                </div>
+                <div class="hero-metric">
+                    <div class="hero-label">Power</div>
+                    <div class="hero-value" id="power">--</div>
+                    <div class="hero-unit">W</div>
+                </div>
+                <div class="hero-metric">
+                    <div class="hero-label">Rotor RPM</div>
+                    <div class="hero-value" id="rotorRpm">--</div>
+                    <div class="hero-unit">rpm</div>
+                </div>
+                <div class="hero-metric">
+                    <div class="hero-label">Status</div>
+                    <div class="hero-value" id="statusCode">--</div>
+                    <div class="hero-unit">code</div>
+                </div>
+            </section>
+
+            <!-- Power Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Power Output</span>
+                    <div class="card-icon">⚡</div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-label">Current</div>
+                        <div class="metric-value" id="powerCurrent">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">10min Avg</div>
+                        <div class="metric-value" id="power10min">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rotation Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Rotation</span>
+                    <div class="card-icon">🔄</div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-label">Rotor</div>
+                        <div class="metric-value" id="rotorRpmCard">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Generator</div>
+                        <div class="metric-value" id="genRpm">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Voltage Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Voltage (Live)</span>
+                    <div class="card-icon">⚙️</div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-label">L1</div>
+                        <div class="metric-value" id="l1v">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">L2</div>
+                        <div class="metric-value" id="l2v">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">L3</div>
+                        <div class="metric-value" id="l3v">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Runtime Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Runtime</span>
+                    <div class="card-icon">⏱️</div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-label">Counter 1</div>
+                        <div class="metric-value" id="runtime1">--</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-label">Counter 2</div>
+                        <div class="metric-value" id="runtime2">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Card -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Status</span>
+                    <div class="card-icon">📊</div>
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <div class="metric-label">Message</div>
+                        <div class="metric-value" id="statusMessage" style="font-size: 0.875rem; white-space: pre-wrap; word-break: break-word;">--</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="controls-section">
+                <div class="controls-header">Turbine Control</div>
+                <div class="controls-grid">
+                    <button class="button button-primary" onclick="sendCommand('start')">Start</button>
+                    <button class="button button-danger" onclick="sendCommand('stop')">Stop</button>
+                    <button class="button button-secondary" onclick="sendCommand('reset')">Reset</button>
+                    <button class="button button-secondary" onclick="sendCommand('manual_start')">Manual</button>
+                    <button class="button button-secondary" onclick="sendCommand('auto')">Auto</button>
+                    <button class="button button-secondary" onclick="sendCommand('ack')">Ack Alarm</button>
+                </div>
+                <div id="commandFeedback" style="margin-top: 1rem; font-size: 0.875rem; color: var(--text-secondary);"></div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let socket = null;
+        let isConnected = false;
+
+        // Initialize Socket.IO
+        function initSocket() {
+            socket = io();
+
+            socket.on('connect', () => {
+                isConnected = true;
+                updateStatus('loading');   // socket up != turbine data live; 'status' decides
+                console.log('Socket connected');
+            });
+
+            socket.on('disconnect', () => {
+                isConnected = false;
+                updateStatus('unavailable');
+                console.log('Socket disconnected');
+            });
+
+            socket.on('data', (data) => {
+                updateMetrics(data);
+            });
+
+            socket.on('status', (status) => {
+                if (status.connected) {
+                    updateStatus('connected');
+                } else {
+                    updateStatus('stale');
+                }
+            });
+
+            socket.on('error', (error) => {
+                console.error('Socket error:', error);
+                if (!isConnected) {
+                    updateStatus('unavailable');
+                }
+            });
+
+            socket.on('command_result', (r) => {
+                const feedback = document.getElementById('commandFeedback');
+                const label = (r.command || 'command').toUpperCase();
+                feedback.textContent = r.ok
+                    ? `${label} sent — reply 0x${r.reply}`
+                    : `${label} failed: ${r.error || 'unknown error'}`;
+            });
+        }
+
+        // Update status indicator
+        function updateStatus(state) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            
+            dot.className = `status-dot ${state}`;
+            
+            const stateMap = {
+                'connected': 'Connected',
+                'stale': 'Stale Data',
+                'loading': 'Loading',
+                'unavailable': 'Disconnected'
+            };
+            
+            text.textContent = stateMap[state] || state;
+        }
+
+        // Update metrics
+        function updateMetrics(data) {
+            const formatValue = (val, decimals = 1) => {
+                if (val === null || val === undefined) return '--';
+                if (typeof val === 'number') return val.toFixed(decimals);
+                return String(val).substring(0, 50);
+            };
+
+            document.getElementById('windSpeed').textContent = formatValue(data.wind_speed_mps);
+            document.getElementById('power').textContent = formatValue(data.power_W, 0);
+            document.getElementById('rotorRpm').textContent = formatValue(data.rotor_rpm);
+            document.getElementById('statusCode').textContent = formatValue(data.current_status_code_0, 0);
+            
+            document.getElementById('powerCurrent').textContent = formatValue(data.power_W, 0);
+            document.getElementById('power10min').textContent = formatValue(data.power_W_10min, 0);
+            
+            document.getElementById('rotorRpmCard').textContent = formatValue(data.rotor_rpm);
+            document.getElementById('genRpm').textContent = formatValue(data.generator_rpm);
+            
+            document.getElementById('l1v').textContent = formatValue(data.l1v);
+            document.getElementById('l2v').textContent = formatValue(data.l2v);
+            document.getElementById('l3v').textContent = formatValue(data.l3v);
+            
+            document.getElementById('runtime1').textContent = formatValue(data.runtime_1_sec, 0);
+            document.getElementById('runtime2').textContent = formatValue(data.runtime_2_sec, 0);
+            
+            const msg = data.status_message;
+            document.getElementById('statusMessage').textContent =
+                (msg === null || msg === undefined || msg === '') ? '--' : String(msg);
+            
+            // Update timestamp
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = now.toLocaleTimeString();
+        }
+
+        // Send command (live backend only; success is reported by 'command_result')
+        function sendCommand(command) {
+            if (!isConnected || !socket) {
+                alert('Not connected to server');
+                return;
+            }
+
+            document.getElementById('commandFeedback').textContent = `Sending: ${command}...`;
+            socket.emit('command', command);
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            initSocket();
+            
+            // Clear feedback message after 3 seconds
+            const observer = new MutationObserver(() => {
+                const feedback = document.getElementById('commandFeedback');
+                if (feedback && feedback.textContent) {
+                    setTimeout(() => {
+                        feedback.textContent = '';
+                    }, 3000);
+                }
+            });
+            
+            observer.observe(document.getElementById('commandFeedback'), { childList: true, characterData: true, subtree: true });
+        });
+
+        // No visibilitychange handler: after removing the mock simulation there is no
+        // polling, timer-driven rendering or animation loop to pause. Updates are
+        // event-driven from socket 'data' events, and the feedback-clear timeouts are
+        // one-shot.
+    </script>
+</body>
+</html>
