@@ -306,3 +306,45 @@ tested against the repo's existing fixture preview harness. **Not pushed,
 not deployed, no PR opened, and no live/physical turbine commands were
 issued** — per instructions, this is local-only pending visual review of
 the screenshots above.
+
+## Deploy/runbook requirement: credential-gated control assertion (added 2026-10-25)
+
+A real deploy regression occurred and must not recur: this host's deploy
+pattern checks out each release into a **fresh** versioned directory
+(`turbine-new-<sha>`). `turbine_monitor.py` loads an optional `.env` file
+from its own directory, and `.env` is gitignored by design (it holds
+`TURBINE_CONTROL_PASSWORD`). A fresh checkout therefore has no `.env`,
+`TURBINE_CONTROL_PASSWORD` is unset, `control_available` silently goes
+`false`, and every control button greys out in the UI — with the service
+otherwise reporting healthy (`active (running)`, MQTT publishing, HTTP
+200). **MQTT freshness and systemd unit state are not sufficient evidence
+that a deploy succeeded.**
+
+### Fix
+
+- The secret now lives at a **stable host path**
+  (`/home/andy/turbine.env`, mode `600`, owner `andy`), referenced via
+  `EnvironmentFile=` in the systemd drop-in
+  (`/etc/systemd/system/turbine.service.d/10-release-override.conf`).
+  This survives every future checkout without being duplicated into each
+  release tree.
+- `turbine_monitor.py`'s in-script `.env` loader is unchanged and uses
+  `os.environ.setdefault(...)`, so it remains a harmless fallback for
+  anyone running from a tree with a local `.env` (e.g. local dev) — the
+  systemd-provided value always takes precedence when present.
+- **Mandatory post-deploy step:** run
+  `scripts/assert_control_enabled.sh <service> [max_wait_seconds]`
+  immediately after every restart. It polls `journalctl`, scoped to the
+  current `ExecMainStartTimestamp` (so a stale log line from a previous
+  run can never false-pass it), for the exact line
+  `Control: ENABLED (password set)`. Exit codes: `0` = confirmed enabled
+  (deploy may proceed/stand), `1` = control confirmed **disabled** (abort
+  the deploy / roll back immediately), `2` = could not determine within
+  the timeout (treat as failed, investigate). It never reads, prints, or
+  depends on the secret's value, and never issues a live control command
+  — it only watches the log line the monitor already emits at startup.
+- **Deploy acceptance from now on requires all of:** unit `active
+  (running)` with the new `ExecStart` path, MQTT sensors fresh and
+  advancing, **and** `assert_control_enabled.sh` exit `0`. Any one of
+  these alone is not sufficient; the credential-gated control path is a
+  distinct failure mode from "the process started" or "telemetry flows."
