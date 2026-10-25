@@ -11,6 +11,14 @@ from typing import Tuple, List, Union, Optional, Iterator, NamedTuple, Dict
 from crc import Calculator, Crc16
 
 
+class MnetFrameError(Exception):
+    """A received frame was short, mis-delimited or failed its CRC check."""
+
+
+class MnetDecodeError(ValueError):
+    """A well-framed reply could not be decoded or did not match its request."""
+
+
 class Event(NamedTuple):
     """A turbine event from the event stack."""
     index: int
@@ -309,15 +317,34 @@ class Mnet:
         return response
     
     def read_packet(self) -> MnetPacket:
-        """Read packet from device."""
+        """Read and validate a packet from the device.
+
+        Raises:
+            MnetFrameError: short read, bad SOH/EOT delimiter, or CRC mismatch.
+        """
         header = self.device.read(6)
+        if len(header) != 6:
+            raise MnetFrameError(f"short header read: {len(header)} of 6 bytes")
         soh, destination, source, packet_type, data_len = struct.unpack('!BBBHB', header)
-        
+        if soh != self.SOH[0]:
+            raise MnetFrameError(f"bad SOH: 0x{soh:02x}")
+
         data = self.device.read(data_len) if data_len > 0 else b''
-        
+        if len(data) != data_len:
+            raise MnetFrameError(f"short data read: {len(data)} of {data_len} bytes")
+
         tail = self.device.read(3)
+        if len(tail) != 3:
+            raise MnetFrameError(f"short tail read: {len(tail)} of 3 bytes")
         crc, eot = struct.unpack('!HB', tail)
-        
+        if eot != self.EOT[0]:
+            raise MnetFrameError(f"bad EOT: 0x{eot:02x}")
+
+        # CRC covers dst..data exactly as received (data is already wire-escaped)
+        expected_crc = Calculator(Crc16.XMODEM).checksum(header[1:] + data)
+        if crc != expected_crc:
+            raise MnetFrameError(f"CRC mismatch: got 0x{crc:04x}, expected 0x{expected_crc:04x}")
+
         return MnetPacket(
             destination.to_bytes(1, byteorder='big'),
             source.to_bytes(1, byteorder='big'),
@@ -502,6 +529,8 @@ class Mnet:
                 value = float(raw_data) * conversion_value if conversion_value != 0 else float(raw_data)
             case 0x4:
                 value = float(raw_data) * pow(10, conversion_value)
+            case _:
+                raise ValueError(f"Unknown conversion type: {conversion_type}")
 
         # Convert to datetime only if data_type is 6 AND data_id is not in the exclusion set
         if data_type == 6 and data_id not in self.DATA_IDS_NOT_TIMESTAMP:
@@ -553,21 +582,40 @@ class Mnet:
         
         return converter()
     
-    def decode_multiple_data(self, data_in: bytes) -> List[Tuple[int, int, Tuple[int, Union[float, str, None]]]]:
-        """Decode multiple data elements from response."""
+    def decode_multiple_data(self, data_in: bytes,
+                             requests: Optional[List[Tuple[bytes, int]]] = None
+                             ) -> List[Tuple[int, int, Tuple[int, Union[float, str, None]]]]:
+        """Decode multiple data elements from response.
+
+        Args:
+            data_in: Decrypted multi-data reply.
+            requests: Optional (data_id bytes, sub_id) list that was sent. When given,
+                the reply must contain exactly one element per request, in order, with
+                matching (mainid, subid) -- otherwise a truncated/reordered reply would
+                silently shift values onto the wrong fields.
+
+        Raises:
+            MnetDecodeError: truncated reply, element-count or (mainid, subid) mismatch.
+        """
         if not data_in:
+            if requests:
+                raise MnetDecodeError(f"empty reply, expected {len(requests)} elements")
             return []
 
         num_elements = data_in[0]
         pos = 1
         results = []
 
-        for _ in range(num_elements):
+        for i in range(num_elements):
             if pos + 9 > len(data_in):
-                break
+                raise MnetDecodeError(
+                    f"truncated reply: header of element {i} of {num_elements} incomplete")
 
             header = data_in[pos:pos+9]
             mainid, subid, _, _, _, length = struct.unpack("!HHBBHB", header)
+            if pos + 9 + length > len(data_in):
+                raise MnetDecodeError(
+                    f"truncated reply: element {i} of {num_elements} needs {length} data bytes")
 
             next_data = data_in[pos+4:pos+9+length]
             # Pass mainid to decode_data for proper type handling
@@ -575,6 +623,16 @@ class Mnet:
             results.append((mainid, subid, decoded))
 
             pos += 9 + length
+
+        if requests is not None:
+            if len(results) != len(requests):
+                raise MnetDecodeError(
+                    f"expected {len(requests)} elements, reply contains {len(results)}")
+            for i, ((req_id, req_sub), (mainid, subid, _)) in enumerate(zip(requests, results)):
+                if (int.from_bytes(req_id, 'big'), req_sub) != (mainid, subid):
+                    raise MnetDecodeError(
+                        f"element {i} mismatch: requested {req_id.hex()}:{req_sub}, "
+                        f"got {mainid:04x}:{subid}")
 
         return results
     
@@ -663,8 +721,8 @@ class Mnet:
         #     abbreviated_ascii = ascii_data[:16] + ('...' if len(ascii_data) > 16 else '')
         #     self._log_callback('DECRYPT', decoded_data.hex(), f'Decrypted ASCII: {abbreviated_ascii}')
         
-        results = self.decode_multiple_data(decoded_data)
-        
+        results = self.decode_multiple_data(decoded_data, requests=datasubids)
+
         # Log debug responses
         if self._debug_callback:
             for i, (mainid, subid, (data_type, value)) in enumerate(results):
