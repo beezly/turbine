@@ -20,6 +20,7 @@ import serial
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
 
+import demo_controller
 import mnet
 from command_dispatcher import CommandDispatcher, DispatchError, parse_envelope
 
@@ -57,7 +58,7 @@ class TurbineMonitor:
     }
 
     def __init__(self, connection: str, mqtt_host: str, web_port: int = 5000,
-                 control_password: Optional[str] = None):
+                 control_password: Optional[str] = None, demo: bool = False):
         """Initialize turbine monitor.
 
         Args:
@@ -69,7 +70,10 @@ class TurbineMonitor:
                 commands elevate to a standard (0x138E) login for the command and
                 then drop back to the hidden read-only login. When None, control
                 commands are refused (monitor stays read-only).
+            demo: talk to a SimulatedController instead of `connection`, and
+                never connect to MQTT so simulated data can't reach the broker.
         """
+        self.demo = demo
         self.connection = connection
         self.mqtt_host = mqtt_host
         self.web_port = web_port
@@ -115,7 +119,7 @@ class TurbineMonitor:
         self.mnet_client = mnet.Mnet(self.serial_device)
         self.mnet_client._log_callback = self._log_serial_hex
         self.mnet_client._debug_callback = self._log_debug_response
-        self.mqtt_client = self._setup_mqtt()
+        self.mqtt_client = None if demo else self._setup_mqtt()
 
         # Get turbine serial number
         self.serial_number, serial_bytes = self.mnet_client.get_serial_number(self.DESTINATION)
@@ -135,8 +139,12 @@ class TurbineMonitor:
             connection: '/dev/ttyUSB0' for serial, 'host:port' or 'tcp://host:port' for network
 
         Returns:
-            Serial device or NetworkSerial instance
+            Serial device, NetworkSerial or (demo mode) SimulatedController instance
         """
+        if self.demo:
+            self.logger.info("DEMO MODE: using a simulated controller, not a real turbine")
+            return demo_controller.SimulatedController()
+
         # Check for network connection formats
         if connection.startswith('tcp://'):
             # tcp://host:port format
@@ -487,6 +495,8 @@ class TurbineMonitor:
 
     def _setup_command_subscription(self):
         """Setup MQTT command topic subscription."""
+        if self.mqtt_client is None:
+            return
         command_topic = f"{self.TOPIC_PREFIX}{self.serial_number}/command"
         self.mqtt_client.subscribe(command_topic)
         self.logger.info(f"Subscribed to command topic: {command_topic}")
@@ -774,6 +784,8 @@ class TurbineMonitor:
         except Exception:
             pass
 
+        if self.mqtt_client is None:
+            return
         try:
             result_payload = {
                 'id': record.request.id,
@@ -906,6 +918,18 @@ class TurbineMonitor:
         topic = f"{self.TOPIC_PREFIX}{self.serial_number}"
         payload = json.dumps(serializable_data)
         
+        if self.mqtt_client is not None:
+            self._mqtt_publish(topic, payload)
+
+        self.latest_data = serializable_data
+        self.status['last_update'] = datetime.now(timezone.utc).isoformat()
+        self.status['connected'] = True
+        
+        self.socketio.emit('data', serializable_data)
+        self.socketio.emit('status', self._status_payload())
+    
+    def _mqtt_publish(self, topic: str, payload: str):
+        """Publish telemetry, waiting briefly for the broker to confirm it."""
         result = self.mqtt_client.publish(topic, payload)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
             try:
@@ -924,13 +948,6 @@ class TurbineMonitor:
             # turbine data is still good, so keep the web UI live and carry on.
             self.logger.warning(f"MQTT publish failed rc={result.rc}: {mqtt.error_string(result.rc)}")
 
-        self.latest_data = serializable_data
-        self.status['last_update'] = datetime.now(timezone.utc).isoformat()
-        self.status['connected'] = True
-        
-        self.socketio.emit('data', serializable_data)
-        self.socketio.emit('status', self._status_payload())
-    
     def _status_payload(self) -> Dict[str, Any]:
         """Status for the web UI: last_update is UTC-aware, and server_time is stamped
         at emit so the browser can compute data age without trusting its own clock."""
@@ -1044,8 +1061,9 @@ class TurbineMonitor:
             self.logger.warning("Command dispatcher still busy at shutdown; waiting for serial lock")
         got_lock = self.serial_lock.acquire(timeout=5.0)
         try:
-            self.mqtt_client.loop_stop()
-            self.mqtt_client.disconnect()
+            if self.mqtt_client is not None:
+                self.mqtt_client.loop_stop()
+                self.mqtt_client.disconnect()
             if got_lock:
                 self.serial_device.close()
             else:
@@ -1066,7 +1084,13 @@ class TurbineMonitor:
 
 def main():
     """Main entry point."""
+    import argparse
     import os
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--demo', action='store_true',
+                        help='run against a simulated controller (no hardware, no MQTT)')
+    args = parser.parse_args()
 
     # Load .env file if it exists
     env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -1085,13 +1109,20 @@ def main():
     time_sync_interval = int(os.environ.get('TIME_SYNC_INTERVAL', '14400'))  # 4 hours default
     control_password = os.environ.get('TURBINE_CONTROL_PASSWORD') or None
 
+    if args.demo:
+        # The simulator accepts any password, so enable control out of the box
+        connection = 'demo (simulated controller)'
+        control_password = control_password or 'demo'
+        print("DEMO MODE: simulated turbine data; MQTT disabled")
+
     print(f"Turbine connection: {connection}")
-    print(f"MQTT host: {mqtt_host}")
+    print(f"MQTT host: {'disabled (demo)' if args.demo else mqtt_host}")
     print(f"Web port: {web_port}")
     print(f"Time sync interval: {time_sync_interval}s ({time_sync_interval/3600:.1f}h)")
     print(f"Control: {'ENABLED (password set)' if control_password else 'disabled (read-only; set TURBINE_CONTROL_PASSWORD to enable)'}")
 
-    monitor = TurbineMonitor(connection, mqtt_host, web_port, control_password=control_password)
+    monitor = TurbineMonitor(connection, mqtt_host, web_port, control_password=control_password,
+                             demo=args.demo)
     monitor.TIME_SYNC_INTERVAL = time_sync_interval
 
     try:
