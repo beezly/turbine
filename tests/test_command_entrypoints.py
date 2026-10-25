@@ -163,28 +163,84 @@ class TestHttpEntrypoint:
         assert resp.status_code == 400
 
     def test_http_queue_full_returns_429(self, monitor):
-        # Fill the queue by blocking the one worker on a slow command, then
-        # saturate max_queue (8) pending items behind it.
-        gate = __import__('threading').Event()
-        monitor._dispatcher_execute = Mock(side_effect=lambda req: (gate.wait(2), {'ok': True})[1])
-        monitor.command_dispatcher._executor = monitor._dispatcher_execute
-        client = self._client(monitor)
-        client.post('/api/command/start', headers={'X-Control-Password': 'pw'})  # consumed by worker
-        # give the worker a moment to pick it up
-        time.sleep(0.05)
-        import threading as _t
+        """Contract: `max_queue` (8) counts PENDING items only; the one
+        command actively executing does not count against it, so the
+        9th in-flight submission (1 executing + 8 queued) is rejected.
 
-        def fire():
-            try:
-                monitor.command_dispatcher.submit('stop', source='mqtt')
-            except Exception:
-                pass
-        for _ in range(8):
-            fire()
-        from command_dispatcher import DispatchError
-        with pytest.raises(DispatchError):
-            monitor.command_dispatcher.submit('reset', source='mqtt')
-        gate.set()
+        Deterministic synchronization only -- no wall-clock sleeps. The
+        executor signals `started` the instant it begins running (proving
+        the worker has actually picked the command up and transitioned it
+        out of the queue) and then blocks on `release` until the test
+        explicitly lets it go. The active command is submitted directly
+        against the dispatcher (not through the synchronous HTTP route,
+        which blocks the calling thread until the command finishes --
+        using it here would let the first command complete before the
+        queue got a chance to fill, racing the worker's drain against the
+        test's fill loop and intermittently under-counting the queue).
+        """
+        import threading
+        started = threading.Event()
+        release = threading.Event()
+
+        def _slow_exec(req):
+            started.set()
+            release.wait(5)
+            return {'ok': True}
+
+        monitor._dispatcher_execute = Mock(side_effect=_slow_exec)
+        monitor.command_dispatcher._executor = monitor._dispatcher_execute
+        dispatcher = monitor.command_dispatcher
+        max_queue = dispatcher._max_queue
+
+        try:
+            # 1) Seed the one actively-executing command directly (bypasses
+            #    the blocking HTTP route) and wait, via Event, for the
+            #    worker to actually start it -- not a guess, a fact.
+            active = dispatcher.submit('start', source='mqtt')
+            assert started.wait(timeout=2), "worker never started the active command"
+            assert active.state.value == 'executing'
+
+            # 2) Fill the queue to exactly max_queue pending items. The
+            #    worker is provably blocked in `release.wait`, so none of
+            #    these can be drained concurrently -- queue depth growth is
+            #    deterministic, not a race.
+            filled = [dispatcher.submit('stop', source='mqtt') for _ in range(max_queue)]
+            assert dispatcher.queue_depth() == max_queue
+            assert monitor._dispatcher_execute.call_count == 1, (
+                "no command beyond the one active executor call should have run yet"
+            )
+
+            # 3) The (max_queue + 1)th in-flight submission must be refused
+            #    with 429, through the real HTTP route. This call returns
+            #    immediately without blocking: DispatchError raises inside
+            #    submit() before the route's completion-wait loop.
+            from command_dispatcher import DispatchError
+            with pytest.raises(DispatchError):
+                dispatcher.submit('reset', source='mqtt')
+
+            client = self._client(monitor)
+            resp = client.post('/api/command/reset', headers={'X-Control-Password': 'pw'})
+            assert resp.status_code == 429
+            body = resp.get_json()
+            assert body['ok'] is False
+
+            # No unexpected physical execution happened while full.
+            assert monitor._dispatcher_execute.call_count == 1
+            assert dispatcher.queue_depth() == max_queue
+        finally:
+            # Release the gate and let every queued/active command drain
+            # to a terminal state before the fixture tears the worker down.
+            release.set()
+            deadline = time.time() + 5.0
+            pending_ids = [active.request.id] + [r.request.id for r in filled]
+            terminal = {CommandState.ACKNOWLEDGED, CommandState.REJECTED,
+                        CommandState.EXPIRED, CommandState.CANCELLED, CommandState.UNKNOWN}
+            for req_id in pending_ids:
+                while time.time() < deadline:
+                    rec = dispatcher.get(req_id)
+                    if rec and rec.state in terminal:
+                        break
+                    time.sleep(0.01)
 
 
 class TestConcurrentInterfaces:
