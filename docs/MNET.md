@@ -447,6 +447,20 @@ Login uses message type 14 with these variants:
 | Remote logout | Logged out |
 | Remote not logged in | Login required |
 
+**Implementation note (hardware-observed, 2026-10-25):** on at least one
+real WP3000 controller (turbinepi), a hidden login request (0x13A1) was
+repeatedly answered with the generic "Reply Acknowledge" code (0x0001, see
+the Packet Type Codes table above) instead of an echo of 0x13A1. The
+replies were correctly addressed (correct source/destination) and never
+the documented 0x1390 rejection, and the prior, unvalidated client code
+had always accepted them as successful logins. `mnet.py`'s
+`REQUEST_RESPONSE_TYPES[REQ_LOGIN]` therefore treats 0x0001 as an
+additional valid hidden-login success reply, alongside the documented
+0x13A1 echo and the 0x1390 rejection. This is controller-specific and is
+**not** assumed for the standard/control login (0x138E) without separate
+hardware evidence -- see `docs/DEPLOYMENT_REPORT_2026-10-25.md` for the
+full incident record.
+
 ### Login Flow
 
 1. Client sends message type 14 with manufacturer code

@@ -101,3 +101,67 @@ The login packet-type allow-list in `mnet.py`
 (`REQUEST_RESPONSE_TYPES[REQ_LOGIN]` / `REQUEST_RESPONSE_TYPES[REQ_LOGIN_STANDARD]`)
 needs to account for the observed `0x0001` reply, confirmed against real
 hardware logs/behavior (not guessed), before this fix is redeployed live.
+
+## Follow-up fix (same day, separate PR — not pushed directly to master)
+
+Root-cause finding, from offline inspection of the real controller
+traceback and `docs/MNET.md` (no live hardware re-tested; no command
+API calls made):
+
+- The pre-PR `mnet.py` performed **no reply-type validation at all** in
+  `send_packet` — it accepted whatever packet type came back for any
+  request, including logins. That is why hidden-login-based monitoring
+  had always worked against this controller despite it replying 0x0001
+  to login.
+- The failing traceback showed the 0x0001 reply passing the new
+  `send_packet`'s source/destination identity checks (it was correctly
+  addressed from the controller back to the client) and never the
+  documented `0x1390` ("Remote not logged in") rejection, across five
+  separate reconnect attempts in the 09:45:46–09:46:38 window. That is
+  hardware-observed evidence of a controller-specific behavior, not a
+  one-off desync/corruption artifact (a desync would also be expected to
+  surface as a source/destination mismatch or a frame/CRC error, which
+  did not occur) — treated per the mandatory rule as evidence, not
+  inference.
+- `docs/MNET.md` documents `0x0001` only as the generic "Reply
+  Acknowledge" type (e.g. for Acknowledge alarm / `0x0BEA`), not as a
+  documented login reply. No raw hex of the actual 0x0001 frame was
+  captured (the `_log_callback` in the new `mnet.py` only fires *after*
+  the type-validation that raised, so the exception's text summary is
+  the only available artifact) — this is acknowledged as a gap, not
+  papered over.
+- Fix applied: `REQUEST_RESPONSE_TYPES[REQ_LOGIN]` (hidden login, 0x13A1
+  only) now also accepts `0x0001` as a valid success reply, in addition
+  to the documented 0x13A1 echo and the 0x1390 rejection.
+  `REQUEST_RESPONSE_TYPES[REQ_LOGIN_STANDARD]` (control login, 0x138E)
+  was deliberately **left unchanged/strict** — there is no hardware
+  evidence for how this controller answers a standard/control login, and
+  control commands were never exercised live, so widening that mapping
+  would be an unverified guess.
+- Added `tests/test_login_ack_quirk.py` (9 new offline tests, mocked
+  in-memory serial device, no hardware): valid-ACK accepted for hidden
+  login, documented echo still accepted, documented negative (0x1390)
+  still raises `MnetLoginRejectedError`, an unrelated wrong type still
+  raises, a corrupted-CRC frame still raises `MnetFrameError` even when
+  the (corrupted) type would otherwise match, the standard login does
+  **not** inherit the 0x0001 allowance, and 0x0001 is **not** treated as
+  a universal "ignore the request type" success code for non-login
+  requests (e.g. `REQ_DATA`).
+- Full suite after the change: `172 passed, 33 skipped` (163 prior +
+  9 new; 33 skipped matches the pre-existing baseline — no regressions).
+- PR: see `docs/DEPLOYMENT_REPORT_2026-10-25.md` update / PR link
+  recorded below once opened. Pushed as a feature branch and opened as a
+  normal PR — **not** pushed directly to `master` (unlike this file's
+  earlier update, which the prior agent pushed directly and should not
+  be repeated).
+
+### Live redeploy status
+
+Not attempted as part of this follow-up. Per the mandatory safety rule,
+a fix is landed via reviewed PR first; a fresh, independently backed-up
+deploy attempt (new backup dir, new rollback script, same bounded
+read-only verification protocol as above) is left for a separate,
+explicit deploy step after this PR merges. Live `turbinepi` remains on
+the original pre-merge code (`fcf0a445885e809629598716a0396d2a94e9b080`,
+PID 28099 at report time), unchanged, with zero errors in the journal
+since the rollback.
