@@ -1,5 +1,8 @@
 # Turbine Dashboard UI Redesign Specification
 
+> **⚠️ NOTE (2026-10-25):** The numbers in this spec are *targets*, not results; none have been measured. The "Optional 3D Turbine View (Babylon.js)" requirement was evaluated and declined — see `docs/BABYLONJS_DECISION.md`. The "offline preview with mock telemetry fixture" requirement is met by `tools/preview_server.py`, which labels fixtures and never touches hardware. The spec's own rule "no fabricated LIVE data" was violated by the original mock mode; that mode has been removed.
+
+
 ## Requirements
 
 ### 1. Visual Layout Improvements
@@ -111,9 +114,18 @@ turbine/
 - Mobile Safari (iOS 14+)
 - Android Chrome
 
-## Performance Targets
+## Performance Targets (targets only — none measured)
 - First paint: < 1.5s (with mock data)
 - 3D model load: < 2s (lazy, async)
 - TTI (Time to Interactive): < 2.5s
 - Lighthouse score: 90+ (Performance, Accessibility, Best Practices)
 
+---
+
+## Correction Note (2026-10-25)
+
+This spec contains targets, not measurements, and none of the targets (first paint, TTI, 3D load time,
+Lighthouse 90+) have been measured. The measured and corrected figures for the implementation that followed
+(and the list of unverified claims made in the companion documents) are in the Correction Notes at the end of
+`UI_REDESIGN_REPORT.md` and `COMPLETION_SUMMARY.md`. Outcome of requirement 4 (optional 3D view): declined,
+see `docs/BABYLONJS_DECISION.md`.
