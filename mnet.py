@@ -192,6 +192,30 @@ class Mnet:
     # well-formed negative reply, not an echo of the login request type.
     REPLY_NOT_LOGGED_IN = b'\x13\x90'
 
+    # "Reply Acknowledge" (1 / 0x0001): docs/MNET.md documents this as a
+    # generic acknowledgment reply type (e.g. for Acknowledge alarm /
+    # 0x0BEA), not as a documented login reply. It was added to the hidden
+    # login (REQ_LOGIN / 0x13A1) mapping below ONLY after being observed,
+    # live, on real turbinepi hardware (2026-10-25 09:45-09:46 deploy
+    # attempt, see docs/DEPLOYMENT_REPORT_2026-10-25.md): five separate
+    # hidden-login attempts each got a 0x0001 reply that passed the source
+    # and destination identity checks below (addressed from the expected
+    # controller back to us, not a stray/misrouted frame) and was never
+    # followed by the documented rejection code 0x1390. This matches the
+    # pre-PR behaviour (send_packet performed no reply-type validation at
+    # all) under which hidden-login-based monitoring worked continuously
+    # against this same controller. Treat this as a controller-specific
+    # quirk: this firmware acknowledges a successful hidden login with the
+    # generic 0x0001 ack instead of echoing 0x13A1.
+    #
+    # This is intentionally NOT extended to REQ_LOGIN_STANDARD (0x138E,
+    # control/write login): no hardware evidence exists for that request
+    # type's reply behaviour (control commands were never exercised against
+    # this controller during the deploy attempt), so it still requires an
+    # exact echo or the documented 0x1390 rejection -- do not infer the same
+    # quirk applies there without separately observed evidence.
+    REPLY_ACK = b'\x00\x01'
+
     # Request packet type -> set of documented valid reply packet types.
     #
     # The Mnet protocol does NOT universally echo request.packet_type back on
@@ -218,7 +242,10 @@ class Mnet:
         b'\x0c\x04': frozenset({b'\x0c\x06'}),          # Display command type 2 -> 0xc06
         b'\x0c\x05': frozenset({b'\x0c\x07'}),          # Display command type 3 -> 0xc07
         b'\x0b\xea': frozenset({b'\x00\x01'}),          # Acknowledge alarm -> Reply Acknowledge (no current caller uses this request type)
-        REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN}),              # hidden login: echo on success, 0x1390 on rejection
+        # Hidden login: echo (0x13A1) or 0x1390 rejection per docs/MNET.md,
+        # PLUS the hardware-observed 0x0001 generic-ack quirk above.
+        REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN, REPLY_ACK}),
+        # Standard (control) login: no 0x0001 evidence -- keep strict.
         REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN}),  # standard login: echo on success, 0x1390 on rejection
     }
 
