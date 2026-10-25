@@ -7,7 +7,6 @@ Monitors wind turbine data via Mnet protocol and publishes to MQTT.
 
 import json
 import logging
-import secrets
 import struct
 import time
 import threading
@@ -315,17 +314,13 @@ class TurbineMonitor:
         @self.app.route('/api/command/<name>', methods=['POST'])
         def api_command(name):
             """Issue a control command through the monitor (elevate -> command ->
-            revert to hidden). Password-gated. Synchronous: waits for execution and
-            returns the result. Supply the control password via the
-            'X-Control-Password' header or a JSON body {"password": "..."}."""
+            revert to hidden). Synchronous: waits for execution and returns the
+            result. No caller credential is required; the server-side
+            control password is used for the controller login. Any
+            'X-Control-Password' header / body 'password' is ignored."""
             name = (name or '').strip().lower()
             if not self.control_password:
                 return jsonify({'error': 'control disabled (no TURBINE_CONTROL_PASSWORD set)'}), 403
-            supplied = request.headers.get('X-Control-Password')
-            if supplied is None and request.is_json:
-                supplied = (request.get_json(silent=True) or {}).get('password')
-            if not isinstance(supplied, str) or not secrets.compare_digest(supplied, self.control_password):
-                return jsonify({'error': 'unauthorized (bad or missing control password)'}), 401
             if name not in self.COMMAND_MAP:
                 return jsonify({'error': 'unknown command: %s' % name,
                                 'valid': sorted(self.COMMAND_MAP)}), 400
@@ -544,38 +539,21 @@ class TurbineMonitor:
         """Handle incoming socket command from web UI: funnels through the
         same dispatcher as MQTT/HTTP.
 
-        Requires a dict {"command": ..., "password": ..., ["request_id"],
-        ["ttl"]} checked against the control password, constant-time, like
-        the HTTP endpoint. Bare strings (the legacy unauthenticated UI
-        shape) are always rejected and never reach the dispatcher. The
-        password is never logged or echoed, and error replies are sent only
-        to the requesting client (never broadcast) so they can never carry a
-        secret to other connected sockets."""
+        Accepts the bare-string shape or a dict envelope {"command",
+        ["request_id"], ["ttl"]}. No caller credential is used: any
+        'password' key in a dict is ignored (never logged or echoed) and the
+        server-side control password is used for the controller login. If no
+        control password is configured the dispatcher rejects the command
+        with the existing 'Control disabled' reason."""
         try:
             if isinstance(command, dict):
                 raw_name = command.get('command')
                 name = raw_name.strip().lower() if isinstance(raw_name, str) else ''
-                supplied = command.get('password')
-                authorized = (
-                    isinstance(supplied, str)
-                    and bool(self.control_password)
-                    and secrets.compare_digest(supplied, self.control_password)
-                )
-                if not authorized:
-                    self.logger.warning("Socket command '%s' rejected: unauthorized", name)
-                    self._emit_to_requester('command_result', {'command': name, 'ok': False,
-                                                                 'error': 'unauthorized'})
-                    return
                 envelope = {'name': name, 'request_id': command.get('request_id'),
                             'ttl': command.get('ttl')}
             elif isinstance(command, str):
-                # Legacy bare-string shape carries no credential; it must
-                # never be queued for execution, regardless of command name.
-                self.logger.warning("Socket command rejected: bare-string "
-                                    "(unauthenticated) commands are no longer accepted")
-                self._emit_to_requester('command_result', {'command': command, 'ok': False,
-                                                             'error': 'unauthorized: password required'})
-                return
+                name = command.strip().lower()
+                envelope = {'name': name, 'request_id': None, 'ttl': None}
             else:
                 self._emit_to_requester('command_result', {'command': '', 'ok': False,
                                                              'error': 'invalid command payload'})

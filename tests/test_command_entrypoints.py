@@ -98,9 +98,7 @@ class TestMqttEntrypoint:
 
 class TestSocketEntrypoint:
     def test_socket_command_funnels_through_same_dispatcher(self, monitor):
-        # Authenticated dict shape (matching the HTTP/MQTT password gate)
-        # is required; this is what actually reaches the dispatcher.
-        monitor._handle_socket_command({'command': 'START', 'password': 'pw'})
+        monitor._handle_socket_command({'command': 'START'})
         recs = list(monitor.command_dispatcher._records.values())
         assert len(recs) == 1
         assert recs[0].request.source == 'socket'
@@ -108,34 +106,26 @@ class TestSocketEntrypoint:
         monitor._dispatcher_execute.assert_called_once()
 
     def test_socket_unknown_command_emits_error_result(self, monitor):
-        monitor._handle_socket_command({'command': 'bogus', 'password': 'pw'})
+        monitor._handle_socket_command({'command': 'bogus'})
         monitor.socketio.emit.assert_any_call(
             'command_result', {'command': 'bogus', 'ok': False, 'error': "unknown command: 'bogus'"})
 
-    def test_socket_bare_string_is_rejected_unauthenticated(self, monitor):
-        # Legacy bare-string shape (no password) must never reach the
-        # dispatcher, regardless of command name.
+    def test_socket_bare_string_is_accepted(self, monitor):
         monitor._handle_socket_command('START')
         recs = list(monitor.command_dispatcher._records.values())
-        assert len(recs) == 0
-        monitor._dispatcher_execute.assert_not_called()
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'START', 'ok': False,
-                                'error': 'unauthorized: password required'})
+        assert len(recs) == 1
+        assert recs[0].request.name == 'start'
+        wait_terminal(monitor, recs[0].request.id)
+        monitor._dispatcher_execute.assert_called_once()
 
-    def test_socket_dict_without_password_is_rejected(self, monitor):
-        monitor._handle_socket_command({'command': 'start'})
+    def test_socket_caller_password_is_ignored_and_not_leaked(self, monitor):
+        monitor._handle_socket_command({'command': 'start', 'password': 'caller-supplied-xyz'})
         recs = list(monitor.command_dispatcher._records.values())
-        assert len(recs) == 0
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
-
-    def test_socket_dict_with_wrong_password_is_rejected(self, monitor):
-        monitor._handle_socket_command({'command': 'start', 'password': 'nope'})
-        recs = list(monitor.command_dispatcher._records.values())
-        assert len(recs) == 0
-        monitor.socketio.emit.assert_any_call(
-            'command_result', {'command': 'start', 'ok': False, 'error': 'unauthorized'})
+        assert len(recs) == 1
+        wait_terminal(monitor, recs[0].request.id)
+        monitor._dispatcher_execute.assert_called_once()
+        assert 'caller-supplied-xyz' not in repr(monitor.socketio.emit.call_args_list)
+        assert 'caller-supplied-xyz' not in repr(monitor.mqtt_client.publish.call_args_list)
 
 
 class TestHttpEntrypoint:
@@ -143,14 +133,24 @@ class TestHttpEntrypoint:
         monitor.app.config['TESTING'] = True
         return monitor.app.test_client()
 
-    def test_http_command_requires_password(self, monitor):
+    def test_http_command_disabled_without_server_password(self, monitor):
+        monitor.control_password = None
+        client = self._client(monitor)
+        resp = client.post('/api/command/start', headers={'X-Control-Password': 'caller-supplied-xyz'})
+        assert resp.status_code == 403
+        assert 'caller-supplied-xyz' not in resp.get_data(as_text=True)
+        monitor._dispatcher_execute.assert_not_called()
+
+    def test_http_caller_password_is_ignored(self, monitor):
+        client = self._client(monitor)
+        resp = client.post('/api/command/start', headers={'X-Control-Password': 'caller-supplied-xyz'},
+                           json={'password': 'caller-supplied-xyz'})
+        assert resp.status_code == 200
+        assert 'caller-supplied-xyz' not in resp.get_data(as_text=True)
+
+    def test_http_command_without_password_executes_through_dispatcher(self, monitor):
         client = self._client(monitor)
         resp = client.post('/api/command/start')
-        assert resp.status_code == 401
-
-    def test_http_command_with_password_executes_through_dispatcher(self, monitor):
-        client = self._client(monitor)
-        resp = client.post('/api/command/start', headers={'X-Control-Password': 'pw'})
         assert resp.status_code == 200
         body = resp.get_json()
         assert body['ok'] is True
@@ -159,7 +159,7 @@ class TestHttpEntrypoint:
 
     def test_http_unknown_command_rejected(self, monitor):
         client = self._client(monitor)
-        resp = client.post('/api/command/bogus', headers={'X-Control-Password': 'pw'})
+        resp = client.post('/api/command/bogus')
         assert resp.status_code == 400
 
     def test_http_queue_full_returns_429(self, monitor):
@@ -219,7 +219,7 @@ class TestHttpEntrypoint:
                 dispatcher.submit('reset', source='mqtt')
 
             client = self._client(monitor)
-            resp = client.post('/api/command/reset', headers={'X-Control-Password': 'pw'})
+            resp = client.post('/api/command/reset')
             assert resp.status_code == 429
             body = resp.get_json()
             assert body['ok'] is False
@@ -256,14 +256,14 @@ class TestConcurrentInterfaces:
 
         def do_socket():
             try:
-                monitor._handle_socket_command({'command': 'stop', 'password': 'pw'})
+                monitor._handle_socket_command({'command': 'stop'})
             except Exception as e:
                 errors.append(e)
 
         def do_http():
             try:
                 with monitor.app.test_client() as c:
-                    c.post('/api/command/reset', headers={'X-Control-Password': 'pw'})
+                    c.post('/api/command/reset')
             except Exception as e:
                 errors.append(e)
 
