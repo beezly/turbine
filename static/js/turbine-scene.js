@@ -135,18 +135,24 @@ export class GaiaWind133Scene {
     // as a visibly different, flatter material.
     const groundTex = new BABYLON.DynamicTexture('groundTex', { width: 512, height: 512 }, scene, false);
     const gctx = groundTex.getContext();
-    gctx.fillStyle = '#242e16'; // dark shadowed canopy-base olive, not bright soil
+    // Per explicit review correction: a dark olive-green ground under
+    // gold blades read as a discoloured blob sitting ON the ground, not
+    // the ground itself -- "ripe wheat fields are gold ground AND gold
+    // crop". Re-toned to the SAME gold family as the blade shader base
+    // color (see grass fragment shader below), not a different green hue.
+    gctx.fillStyle = '#4a3f18'; // dim wheat-gold shade base, matches blade hue family
     gctx.fillRect(0, 0, 512, 512);
     let seed = 1234567;
     const rand = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed % 1000) / 1000; };
     for (let i = 0; i < 900; i++) {
       const shade = rand();
-      // Golden-green range matching the wheat blade palette (see grass
-      // fragment shader base colors below); darker overall than the
-      // blades themselves since this represents shaded undergrowth/gaps.
-      const r = Math.floor(34 + shade * 40);
-      const g = Math.floor(40 + shade * 38);
-      const b = Math.floor(16 + shade * 14);
+      // Golden range matching the wheat blade palette (see grass fragment
+      // shader base colors below); darker overall than the blades
+      // themselves since this represents shaded undergrowth/gaps, but the
+      // SAME hue family (gold), not a green undertone.
+      const r = Math.floor(58 + shade * 54);
+      const g = Math.floor(48 + shade * 46);
+      const b = Math.floor(14 + shade * 16);
       gctx.fillStyle = 'rgba(' + r + ',' + g + ',' + b + ',0.6)';
       const x = rand() * 512;
       const y = rand() * 512;
@@ -215,81 +221,17 @@ export class GaiaWind133Scene {
     const BABYLON = window.BABYLON;
     const scene = this.scene;
 
-    // Matte materials throughout -- StandardMaterial defaults to a WHITE
-    // specular highlight if specularColor isn't set explicitly, which is
-    // exactly what made the rocks/trees read as shiny "billiard balls"
-    // under the strong directional sun. Every field-prop material below
-    // sets specularColor near zero deliberately.
-    // Darker, greyer drystone tone -- the previous 0.5/0.46/0.41 pale
-    // cream read as breeze-blocks/pallets, not stone. Each segment also
-    // gets a small per-segment tint/size jitter below so courses don't
-    // look uniformly stamped from one mold.
-    const wallMatBase = new BABYLON.Color3(0.32, 0.31, 0.29);
-
-    // Low drystone walls as a chain of short box segments with small real
-    // gaps between them (so they read as discrete stacked stone courses,
-    // not one continuous plank/rail), each ~1.0-1.2m tall and ~0.45m
-    // thick. Two straight runs meeting near the turbine's NW corner (no
-    // per-segment rotation jitter -- that fanning was contributing to the
-    // "diagonal plank" look).
-    // Repositioned using direct camera-projection measurement (not visual
-    // guessing) after repeated corner-clipping regressions: in this
-    // camera's screen space, DECREASING world x and DECREASING world z
-    // both move a point UP and LEFT, away from the bottom-right corner.
-    // This run (x -18..-30, z 16) was verified to project with >20%
-    // margin on every edge at 1280 width before being committed here.
-    const wallSegments = [
-      ...Array.from({ length: 4 }, (_, i) => ({ x: -18 - i * 4.0, z: 16, rotY: 0, height: 1.0 + (i % 3) * 0.07 })),
-      ...Array.from({ length: 5 }, (_, i) => ({ x: -34, z: 16 - i * 3.6, rotY: Math.PI / 2, height: 1.0 + (i % 3) * 0.07 })),
-    ];
+    // DELETED per explicit third-time review request: the drystone
+    // wall segments and the rock cluster were read in real screenshots
+    // as "scaffolding/a gate frame" and "traffic cones/paper cups"
+    // respectively, not as deliberate field props. Per review direction
+    // ("an empty wheat field is better than confusing props... if it
+    // cannot be made to look deliberate, DELETE it and say you deleted
+    // it"), both are removed entirely rather than re-tuned again. The
+    // tree stand below is kept (it was not flagged as a problem on its
+    // own) but is no longer paired with a wall silhouette behind it.
     this.wallMeshes = [];
-    let wseed = 9173;
-    const wrand = () => { wseed = (wseed * 1103515245 + 12345) & 0x7fffffff; return (wseed % 1000) / 1000; };
-    wallSegments.forEach((seg, i) => {
-      const jitter = (wrand() - 0.5) * 0.06; // +/-0.03 per-channel tonal variation
-      const segMat = new BABYLON.StandardMaterial(`wallSegMat${i}`, scene);
-      segMat.diffuseColor = new BABYLON.Color3(
-        wallMatBase.r + jitter, wallMatBase.g + jitter * 0.9, wallMatBase.b + jitter * 0.8,
-      );
-      segMat.specularColor = new BABYLON.Color3(0.015, 0.015, 0.015);
-      const segWidth = 3.2 + wrand() * 0.6; // slight block-size variation, 3.2-3.8m
-      const wall = BABYLON.MeshBuilder.CreateBox('wallSeg', { width: segWidth, height: seg.height, depth: 0.42 + wrand() * 0.06 }, scene);
-      wall.position.set(seg.x, seg.height / 2, seg.z);
-      wall.rotation.y = seg.rotY;
-      wall.material = segMat;
-      shadowGenerator.addShadowCaster(wall);
-      wall.receiveShadows = true;
-      this.wallMeshes.push(wall);
-    });
-
-    // The previous tan "scrub patch" ground plane read as a bright flat
-    // card dropped on the grass -- too light/saturated against the field,
-    // hard polygon edges, and it intruded into frame at every width. Per
-    // review direction ("if fiddly, CUT IT -- it adds nothing"), it is
-    // removed entirely rather than re-tuned. A small cluster of embedded
-    // rocks remains (muted, pulled well clear of the camera frustum edge)
-    // as the only eastern-boundary texture cue.
-    const rockMat = new BABYLON.StandardMaterial('rockMat', scene);
-    rockMat.diffuseColor = new BABYLON.Color3(0.38, 0.37, 0.34);
-    rockMat.specularColor = new BABYLON.Color3(0.015, 0.015, 0.015);
-    let rseed = 55331;
-    const rrand = () => { rseed = (rseed * 1103515245 + 12345) & 0x7fffffff; return (rseed % 1000) / 1000; };
     this.rockMeshes = [];
-    for (let i = 0; i < 10; i++) {
-      const size = 0.22 + rrand() * 0.4;
-      const rock = BABYLON.MeshBuilder.CreatePolyhedron('rock', { type: Math.floor(rrand() * 3), size }, scene);
-      // Sink roughly half the rock below the ground plane so it looks
-      // embedded rather than resting/floating on top of it. Kept well
-      // inside the near field (x 12-18) and south of the tree line so it
-      // never approaches the camera frustum edge at 1280/390/320.
-      // Verified by direct camera projection (x 4-10, z -3..2) to clear
-      // the bottom edge with >10% margin at 1280 width.
-      rock.position.set(4 + rrand() * 6, size * 0.35, -3 + rrand() * 5);
-      rock.rotation.set(rrand() * Math.PI, rrand() * Math.PI, rrand() * Math.PI);
-      rock.material = rockMat;
-      shadowGenerator.addShadowCaster(rock);
-      this.rockMeshes.push(rock);
-    }
 
     // Loose stand of trees BEYOND the north wall (trunk + 2-3 stacked low
     // -poly cones, not a sphere canopy -- a sphere canopy under this
@@ -517,8 +459,19 @@ export class GaiaWind133Scene {
     // full density at the turbine out toward the horizon, with a small
     // floor so it never visually hits a hard zero, and that eliminates
     // the seam entirely.
-    const DENSITY_DECAY = 8; // metres: density ~37% of peak by this radius -- tighter core than the first attempt, which still read too sparse near the turbine
-    const DENSITY_FLOOR = 0.05; // never fully empty even at the far edge -- blends into the re-toned canopy-shadow ground instead of a visible gap
+    //
+    // CORRECTED per explicit review of real screenshots: DECAY=8 (~37%
+    // of peak density by 8m) collapsed almost all blades into a small
+    // disc roughly a third of the frame width, leaving a large empty
+    // expanse of bare ground texture to the horizon -- coverage AREA
+    // matters more than peak density, and this field's instanced canopy
+    // must extend out close to the FIELD_RADIUS, not just near the
+    // tower. DECAY raised ~4x so density is still over half its peak at
+    // 25m, and FLOOR raised substantially (0.05 -> 0.35) so even the far
+    // edge of the disc stays a dense, visually continuous canopy rather
+    // than fading into "mostly ground texture" territory.
+    const DENSITY_DECAY = 30; // metres: density ~37% of peak by 30m, not 8m -- extends canopy toward the horizon, not just the tower base
+    const DENSITY_FLOOR = 0.35; // far edge stays a dense canopy, not a fade into bare/ground-texture-dominated territory
     // Order-of-magnitude density rise per review: cheap 3-vertex blades
     // make this affordable, but it is scaled by viewport AND measured
     // against a real FPS budget (see docs/GAIA133_VISUALIZATION.md FPS
@@ -537,24 +490,36 @@ export class GaiaWind133Scene {
     // within an interactive frame budget on this host, so the visual
     // density gain instead comes from uniform (no bare-gap) placement,
     // wider blades, and a matching ground tone, not from raw count alone.
-    const COUNT = isNarrow ? 4500 : 10000;
+    // Count raised substantially to match the extended coverage radius
+    // above (DECAY 8->30 roughly triples the effective covered radius,
+    // i.e. ~9x the covered area) -- per Andrew's explicit correction,
+    // this host's FPS measurements are software-rasterized (ANGLE/
+    // SwiftShader, no GPU) and are NOT a valid ship gate; thin-instanced
+    // single-triangle/two-triangle blades are close to free on real
+    // hardware WebGL. Density is chosen for visual coverage; the
+    // adaptive DPR/FPS caps, hidden-tab suspension, and reduced-motion
+    // behaviour remain the real safety mechanism for weak real clients
+    // (see docs/GAIA133_VISUALIZATION.md).
+    const COUNT = isNarrow ? 22000 : 48000;
 
-    // Per-blade geometry is deliberately a 3-vertex / 1-triangle sliver
-    // (root-left, root-right, tip-apex), NOT the earlier 5-segment tapered
-    // ribbon (12 verts / 10 tris). Per explicit review direction: make
-    // each blade as cheap as possible so the instance COUNT can rise by
-    // an order of magnitude -- a wheat field needs hundreds of stalks per
-    // square metre to read as a continuous canopy rather than tufts on
-    // bare ground, and that budget only exists if each blade is this
-    // cheap. Local y still runs root(0) -> tip(1) so the existing
-    // quadratic bend-weight logic in the vertex shader needs no change.
+    // Per-blade geometry: a 4-vertex / 2-triangle QUAD (root-left,
+    // root-right, tip-left, tip-right), NOT the single 3-vertex sliver
+    // tried first. Per explicit review correction: a zero-width sliver
+    // has no AREA, so dense slivers still read as scattered straw hairs
+    // with visible gaps rather than a canopy -- "cheap geometry was the
+    // right instinct, zero width was not". A 2-tri quad is still very
+    // cheap (one more triangle than the sliver) but gives each blade
+    // real screen coverage. Local y still runs root(0) -> tip(1) so the
+    // existing quadratic bend-weight logic in the vertex shader needs no
+    // change (both edges bend together).
     const positions = [
-      -0.06, 0, 0,  // root left
-       0.06, 0, 0,  // root right
-       0, 1, 0,      // tip apex
+      -0.09, 0, 0,  // root left
+       0.09, 0, 0,  // root right
+      -0.035, 1, 0, // tip left (slight taper, not a point)
+       0.035, 1, 0, // tip right
     ];
-    const indices = [0, 1, 2];
-    const uvs = [0, 0, 1, 0, 0.5, 1];
+    const indices = [0, 1, 2, 2, 1, 3];
+    const uvs = [0, 0, 1, 0, 0, 1, 1, 1];
     const bladeMesh = new BABYLON.Mesh('grassBlade', scene);
     const vd = new BABYLON.VertexData();
     vd.positions = positions;
@@ -589,7 +554,7 @@ export class GaiaWind133Scene {
       // calm" already falls out of that).
       const heightScale = 1.3 + rand() * 0.55; // 1.3 - 1.85 m, taller than the old 1.1-1.8 meadow-grass range
       const rot = rand() * Math.PI * 2;
-      const widthScale = 1.1 + rand() * 0.5; // wide enough that dense neighbors visually overlap/touch
+      const widthScale = 1.6 + rand() * 0.9; // widened further per review correction: the quad geometry change alone wasn't enough, blades must visually overlap at this density to read as canopy, not scattered stalks
       BABYLON.Matrix.ComposeToRef(
         new BABYLON.Vector3(widthScale, heightScale, 1),
         BABYLON.Quaternion.RotationAxis(BABYLON.Vector3.Up(), rot),
@@ -780,11 +745,13 @@ export class GaiaWind133Scene {
       varying float vTint;
       varying float vPatch;
       void main() {
-        // Wheat palette: golden-green rather than the old uniform olive --
-        // mixes a deeper green-gold base with a brighter golden-green tip
-        // per-blade (vTint), so stalks read as individually toned wheat,
-        // not a single flat grass color.
-        vec3 base = mix(vec3(0.33, 0.34, 0.11), vec3(0.52, 0.47, 0.17), vTint);
+        // Wheat palette: GOLD family throughout (matches the re-toned
+        // ground texture's gold base), not green-gold -- per explicit
+        // review correction, a green-tinted base under a gold ground
+        // read as a colour mismatch/discoloured-blob look. Mixes a
+        // deeper shadowed gold base with a brighter straw-gold tip
+        // per-blade (vTint).
+        vec3 base = mix(vec3(0.42, 0.34, 0.09), vec3(0.68, 0.56, 0.18), vTint);
         // Coherent lighter/darker travelling patches (vPatch, shared by the
         // whole gust wave, not per-blade random noise) so a single still
         // shows legible gust bands, plus a per-blade tip highlight.

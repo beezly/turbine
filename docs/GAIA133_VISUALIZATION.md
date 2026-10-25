@@ -433,3 +433,101 @@ continuous-canopy model, with the following real findings along the way:
   amplitude/frequency scaling; calm settles exactly still; stale/
   disconnected/invalid telemetry freezes motion; reduced-motion stays
   static; rotor motion is strictly `rotor_rpm`-driven.
+
+## Wheat-field second review round (2026-10-25, ~21:20 UTC) -- corrections
+
+A direct parent review of the first wheat-field attempt's screenshots
+rejected it and supplied two corrections, both acted on below.
+
+### Correction 1: the FPS ceiling measured above was a software-render artefact, not a ship gate
+Andrew confirmed the deployment target has real hardware WebGL. The test
+node used for all FPS measurement in the section above reports (from the
+browser's own graphics status): `webgl: unavailable_software`,
+`gpu_compositing: disabled_software`, renderer `ANGLE (Vulkan 1.3.0
+(SwiftShader Device...))` -- i.e. pure CPU software rasterization, no
+GPU. The earlier FPS table is real and the measurement methodology was
+sound, but its *conclusion* ("does not support higher density at any
+usable frame rate") only holds for this specific software-rendered test
+environment, not for any device this will actually be viewed on. It is
+retracted as a density justification. Thin-instanced 1-2-triangle blades
+are inexpensive on real GPU-accelerated WebGL; tens of thousands of
+instances is unremarkable there. The existing adaptive DPR cap
+(`MAX_DPR=1.5`), FPS cap (`MAX_FPS=30`), hidden-tab suspension, and
+reduced-motion handling remain in place as the actual safety mechanism
+for weak real clients -- they degrade gracefully rather than requiring
+density to be pre-crippled for an untested hypothetical weak device.
+
+### Correction 2: the first attempt was not a wheat field -- four concrete defects, each fixed
+Direct review of `desktop1280_calm`/`desktop1280_windy`/`mobile390_live`
+from the first attempt found:
+1. **Coverage was a small disc, not a field.** `DENSITY_DECAY=8m` meant
+   density was down to ~37% of peak by 8m from the tower and continued
+   falling from there -- visually, grass occupied roughly a third of the
+   frame width with a large bare-looking expanse of ground texture to
+   the horizon beyond it. Fixed by raising `DENSITY_DECAY` to 30m (so
+   density is still >37% of peak at 30m, not 8m) and raising
+   `DENSITY_FLOOR` from 0.05 to 0.35 so even the far edge of the
+   FIELD_RADIUS=55m disc stays a dense, visually continuous canopy
+   rather than fading toward "mostly ground texture."
+2. **Zero-width blades read as hairs, not canopy.** The 3-vertex/1-
+   triangle sliver tried first had no width/area, so even at high
+   density it read as scattered straw hairs with visible gaps. Reverted
+   to a 4-vertex/2-triangle quad (root-left, root-right, tip-left,
+   tip-right, slightly tapered) -- still very cheap (one extra triangle
+   versus the sliver) but gives each blade real screen-covering area.
+   Width also raised further (`widthScale` 1.6-2.5, up from 1.1-1.6) so
+   neighbors visually overlap rather than merely touch.
+3. **Colour mismatch**: dark olive-green ground under bright golden
+   blades read as a discoloured patch sitting on top of the ground,
+   rather than being the ground. Both re-toned into a single gold
+   family: ground base fill changed from `#242e16` (dark olive) to
+   `#4a3f18` (dim wheat-gold), ground mottling shifted from a green-gold
+   range to a pure gold range, and the blade shader's base/tip colors
+   shifted from green-gold (`vec3(0.33,0.34,0.11)`..`vec3(0.52,0.47,0.17)`)
+   to a consistent gold range (`vec3(0.42,0.34,0.09)`..`vec3(0.68,0.56,0.18)`).
+4. **Instance count raised to match the extended coverage area.** With
+   the ~9x larger effective covered area from the DECAY change, COUNT
+   was raised from `isNarrow ? 4500 : 10000` to `isNarrow ? 22000 :
+   48000`. This relies directly on Correction 1 above (software-render
+   FPS is not the gate); the generation-time `attempts` loop budget
+   (`COUNT * 40`) comfortably handles this without a measurable startup
+   delay in manual testing.
+
+### Props deleted (third explicit request)
+The drystone wall segments and the embedded-rock cluster were read in
+direct screenshot review as "scaffolding/a gate frame" and "traffic
+cones/paper cups" respectively -- not as deliberate field props, on the
+third round of feedback about them. Per explicit instruction ("an empty
+wheat field is better than confusing props... if it cannot be made to
+look deliberate, DELETE it and say you deleted it"), both are now
+**deleted** from `_buildField()` rather than re-tuned again. The tree
+stand (trunk + stacked low-poly canopy cones) is retained, since it was
+not itself flagged as a problem -- only its earlier pairing with a
+wall-like silhouette behind it was.
+
+### Final figures (this round)
+- Coverage: continuous exponential radial density out to the full
+  `FIELD_RADIUS=55m`, `DENSITY_DECAY=30m`, `DENSITY_FLOOR=0.35`
+  (previous round: `DECAY=8m`, `FLOOR=0.05`).
+- Instance count: desktop 48,000 / narrow(mobile) 22,000 (previous
+  round: 10,000 / 4,500).
+- Blade geometry: 4 verts / 2 tris, width 1.6-2.5x base (previous round:
+  3 verts / 1 tri, width 1.1-1.6x).
+- Palette: single gold family for both ground and blades (previous
+  round: green-gold ground vs gold blades, a colour mismatch).
+- Props: wall and rocks deleted; trees retained alone.
+- Tests re-run after all of the above: 19/19 JS, 275 passed/33 skipped
+  Python (both exit 0). FPS was NOT re-measured as a gating number this
+  round, per Correction 1 -- the existing adaptive caps are the safety
+  mechanism, not a pre-chosen density ceiling from this unrepresentative
+  host.
+- Evidence: `.qa-artifacts/wheatfield_fix2_20261025_2120/` -- calm/windy
+  pair at identical camera, a 4-frame gust sequence
+  (`gust_t0..t3.png`), and `mobile390_live.png`/`mobile320_live.png`,
+  all stat/md5'd.
+
+Honesty gating unchanged throughout this round: real `wind_speed_mps`
+still drives only amplitude/frequency; calm settles exactly still;
+stale/disconnected/invalid telemetry freezes; reduced-motion stays
+static; rotor motion remains strictly `rotor_rpm`-driven; the k^-2
+7-mode forcing model, 30deg NW->SE cone, and omega0 are untouched.
