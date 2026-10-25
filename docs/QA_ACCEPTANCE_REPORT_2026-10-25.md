@@ -12,21 +12,90 @@ and the prior (untracked) `backend_validation_plan.md` gap analysis, which
 had flagged three "HIGH PRIORITY" gaps as not yet addressed:
 
 - **Gap A** (response source/destination validation in `send_packet`):
-  **already implemented** — `mnet.py:300-337` validates
-  `response.source == destination`, `response.destination == self.id`, and
-  `response.packet_type == packet_type`, raising `MnetDecodeError` on
-  mismatch.
-- **Gap B** (`logged_in` flag not gating requests): **already implemented**
-  — `turbine_monitor.py:656` and `:788` gate request paths on
-  `self.logged_in`.
-- **Gap C** (unstandardized transaction identity validation): **already
-  implemented** — `send_command`, `request_data`, `request_multiple_data`,
-  and the remote-display getters all route through `send_packet`, which
-  performs the Gap A validation uniformly.
+  source/destination checks were present and correct in `bb12e0f`. The
+  packet-type check introduced by commit `69d7e0c` asserted
+  `response.packet_type == packet_type` (a universal echo check), and this
+  QA report's first draft (superseded by the "Correction" section below)
+  endorsed that echo check as correct validation. **That endorsement was
+  wrong and is retracted here.**
+- **Gap B** (`logged_in` flag not gating requests): already implemented —
+  `turbine_monitor.py:656` and `:788` gate request paths on
+  `self.logged_in`. Unaffected by this correction.
+- **Gap C** (unstandardized transaction identity validation): `send_command`,
+  `request_data`, `request_multiple_data`, and the remote-display getters do
+  route through `send_packet` uniformly, but `send_packet` itself enforced
+  the wrong rule (see "Correction" below).
 
-Conclusion: the gap-analysis document in the repo was stale relative to the
-current `HEAD` (bb12e0f); no further backend code changes were needed. No
-edits made to `mnet.py` / `turbine_monitor.py`.
+### Correction (superseding the above "already implemented" conclusion for Gap A)
+
+**The original conclusion was wrong.** `send_packet` (introduced by
+`69d7e0c`, commit message "Validate response destination/type...") asserted
+`response.packet_type == packet_type` — i.e. that every reply echoes its
+request's packet type. Per `docs/MNET.md` "Packet Type Codes" and "Message
+Sequence Examples", the Mnet protocol does **not** work that way for most
+message types: request and reply use distinct, specifically-documented
+codes, e.g.:
+
+- Request data `0x0C28` → Reply data `0x0C29`
+- Request multiple data `0x0C2A` → Reply multiple data `0x0C2B`
+- Request write data `0x0C2C` → Reply write data `0x0C2D`
+- Request serial no. `0x0C2E` → Reply serial no. `0x0C2F`
+- Display command type 2 `0x0C04` → `0x0C06`; type 3 `0x0C05` → `0x0C07`
+- Acknowledge alarm `0x0BEA` → Reply Acknowledge `0x0001`
+
+Login (`0x138E` standard, `0x13A1` hidden) is the documented exception where
+a *successful* login reply does echo the request's own type; a *rejected*
+login instead returns the shared "Remote not logged in" code `0x1390` — a
+valid negative, not a successful login and not corruption.
+
+Under the old universal-echo rule, a genuine, correctly-formed reply to
+e.g. a `0x0C28` data request (type `0x0C29`) would have been **rejected**
+as a "packet type mismatch", and conversely a reply that happened to merely
+echo the request type back (not a real documented reply) would have been
+**wrongly accepted**. This QA report previously endorsed that behavior as
+correct; it was not.
+
+**Fix applied in this pass**, as an uncommitted working-tree change on top
+of `2209c2b` at the time this correction was written (committed separately
+immediately after, with the resulting commit hash recorded in this repo's
+`git log`): `mnet.py` `send_packet` (now `mnet.py:341-420`,
+moved from the `69d7e0c`-era `mnet.py:300-337` cited above as the original
+code location) now resolves an explicit,
+per-request-type set of documented valid reply types
+(`Mnet.REQUEST_RESPONSE_TYPES`) built directly from `docs/MNET.md`, instead
+of assuming echo. Source/destination identity validation (the part of Gap A
+that was actually correct) is unchanged. A login request that receives the
+documented `0x1390` "Remote not logged in" reply now raises a dedicated
+`MnetLoginRejectedError` (a subclass of `MnetDecodeError`) so callers can
+distinguish a valid rejection from a successful login or from frame/CRC
+corruption, rather than being misreported as a generic type mismatch.
+Request types with no documented reply code in `docs/MNET.md` (currently
+only `REQ_COMMAND` / `0x0C32`, whose only caller logs whatever type comes
+back without asserting one) still require an exact echo as a conservative
+fallback — not because echo is proven correct for that type, but because no
+reply code is documented for it and documented pairs higher are known to be
+non-echo, so nothing better is invented.
+
+Two existing tests in `tests/test_protocol_recovery.py`
+(`test_send_packet_accepts_matching_source`,
+`test_send_packet_accepts_fully_matching_wire_response`) were self-confirming
+fixtures: they constructed a `0x0c28` request's "good" reply as itself
+`0x0c28` (an echo), which is not what the real protocol or `docs/MNET.md`
+describes. Both were corrected in place to use the documented `0x0c29`
+reply type (not duplicated). Eleven new tests were added in
+`TestTransactionIdentityValidation` covering: an echoed reply being
+rejected where docs require a different type, an unrelated wrong reply
+type being rejected, multiple-data/write-data/serial-number/acknowledge-alarm
+documented reply types, successful login echo (both login variants), login
+rejection raising `MnetLoginRejectedError` for both login variants, and a
+corrupted "not logged in" frame still failing CRC validation rather than
+being accepted as a valid rejection. No CRC or source/destination
+assertions were weakened; only the request→reply type expectation was
+corrected to match `docs/MNET.md`.
+
+Conclusion: the gap-analysis document being stale was true for Gaps B and
+C, but Gap A's packet-type-echo assumption was independently wrong and is
+corrected above.
 
 ## 2. UI contrast review
 
@@ -48,8 +117,23 @@ $ /home/andy/projects/turbine/venv/bin/python -m pytest -q --no-header
 ======================= 152 passed, 33 skipped in 0.44s ========================
 ```
 
-Exit code 0. Matches prior coordinator evidence (152 passed / 33 skipped);
-confirmed fresh, not reused.
+Exit code 0. Matches prior coordinator evidence (152 passed / 33 skipped) at
+the time this report was first written, against the then-unmodified
+`bb12e0f`/`2209c2b` tree. **Superseded by the correction above**: after
+fixing `send_packet`'s request→reply type mapping and correcting the two
+self-confirming echo fixtures (plus 11 new tests), the suite now reports:
+
+```
+$ /home/andy/projects/turbine/venv/bin/python -m pytest -q --no-header
+...
+======================= 163 passed, 33 skipped in 0.46s ========================
+```
+
+Exit code 0, still unpiped. 163 = 152 original + 11 new tests added to
+`tests/test_protocol_recovery.py::TestTransactionIdentityValidation` (the 2
+pre-existing self-confirming echo tests in that class were corrected
+in place, not duplicated, so they are not additional counts). Skip count
+(33) unchanged — same previously-skipped tests, untouched by this fix.
 
 ## 4. Browser acceptance QA (finite harness, no background processes)
 

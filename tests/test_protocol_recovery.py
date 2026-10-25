@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch, MagicMock
 import pytest
 
 import mnet
-from mnet import Mnet, MnetPacket, MnetDecodeError
+from mnet import Mnet, MnetPacket, MnetDecodeError, MnetLoginRejectedError
 
 
 # ---------------------------------------------------------------- helpers
@@ -546,7 +546,9 @@ class TestTransactionIdentityValidation:
         good_response = MagicMock()
         good_response.source = b'\x02'  # Expected source (controller)
         good_response.destination = mnet.id  # Addressed back to us
-        good_response.packet_type = b'\x0c\x28'  # Echoes request type
+        # Per docs/MNET.md, Request data (0x0c28) replies with Reply data
+        # (0x0c29) -- not an echo of the request type.
+        good_response.packet_type = b'\x0c\x29'
         good_response.data = b'test'
         
         mnet.read_packet = MagicMock(return_value=good_response)
@@ -579,13 +581,111 @@ class TestTransactionIdentityValidation:
             mnet.send_packet(b'\x02', b'\x0c\x28', b'')
 
     def test_send_packet_accepts_fully_matching_wire_response(self):
-        """A real framed reply (dst=our id, src=controller, same type) passes."""
-        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x28', 2, b'\x9c\x43'))
+        """A real framed reply (dst=our id, src=controller, documented
+        reply type 0x0c29 for a 0x0c28 request) passes."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x29', 2, b'\x9c\x43'))
         mnet = Mnet(FakeDevice(frame))
 
         result = mnet.send_packet(b'\x02', b'\x0c\x28', b'')
         assert result.data == b'\x9c\x43'
-    
+
+    def test_send_packet_rejects_echoed_reply_when_docs_require_different_type(self):
+        """A reply that merely echoes the request type (0x0c28) must be
+        rejected for request types with a documented, different reply code
+        (0x0c28 -> 0x0c29 per docs/MNET.md); echo is not a valid substitute."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x28', 2, b'\x9c\x43'))
+        mnet = Mnet(FakeDevice(frame))
+
+        with pytest.raises(MnetDecodeError, match='packet type mismatch'):
+            mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+
+    def test_send_packet_rejects_unrelated_wrong_reply_type(self):
+        """An entirely unrelated reply type must still be rejected."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x2d', 2, b'\x9c\x43'))
+        mnet = Mnet(FakeDevice(frame))
+
+        with pytest.raises(MnetDecodeError, match='packet type mismatch'):
+            mnet.send_packet(b'\x02', b'\x0c\x28', b'')
+
+    def test_send_packet_multiple_data_accepts_documented_reply_type(self):
+        """Request multiple data (0x0c2a) -> Reply multiple data (0x0c2b)."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x2b', 1, b'\x00'))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x0c\x2a', b'\x00')
+        assert result.packet_type == b'\x0c\x2b'
+
+    def test_send_packet_write_data_accepts_documented_reply_type(self):
+        """Request write data (0x0c2c) -> Reply write data (0x0c2d)."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x2d', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x0c\x2c', b'')
+        assert result.packet_type == b'\x0c\x2d'
+
+    def test_send_packet_serial_number_accepts_documented_reply_type(self):
+        """Request serial no. (0x0c2e) -> Reply serial no. (0x0c2f)."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x0c\x2f', 4, b'\x00\x00\x00\x01'))
+        mnet = Mnet(FakeDevice(frame))
+
+        serial, data = mnet.get_serial_number(b'\x02')
+        assert serial == 1
+
+    def test_send_packet_ack_alarm_accepts_documented_reply_type(self):
+        """Acknowledge alarm (0x0bea) -> Reply Acknowledge (0x0001)."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x00\x01', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x0b\xea', b'')
+        assert result.packet_type == b'\x00\x01'
+
+    def test_send_packet_login_standard_accepts_success_echo(self):
+        """A successful standard login (0x138e) echoes its own request type."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x13\x8e', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x13\x8e', b'')
+        assert result.packet_type == b'\x13\x8e'
+
+    def test_send_packet_login_hidden_accepts_success_echo(self):
+        """A successful hidden login (0x13a1) echoes its own request type."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x13\xa1', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        result = mnet.send_packet(b'\x02', b'\x13\xa1', b'')
+        assert result.packet_type == b'\x13\xa1'
+
+    def test_send_packet_login_rejected_raises_dedicated_error(self):
+        """A well-formed "Remote not logged in" (0x1390) reply to a login
+        request is a valid negative acknowledgement -- distinct from a
+        successful login and from frame/CRC corruption -- and must raise
+        the dedicated MnetLoginRejectedError (a subclass of MnetDecodeError),
+        with CRC validation still intact on the wire frame."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x13\x90', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        with pytest.raises(MnetLoginRejectedError):
+            mnet.send_packet(b'\x02', b'\x13\x8e', b'')
+
+    def test_send_packet_login_rejected_hidden_login_variant(self):
+        """Hidden login (0x13a1) rejection also raises MnetLoginRejectedError."""
+        frame = bytes(MnetPacket(b'\x01', b'\x02', b'\x13\x90', 0, b''))
+        mnet = Mnet(FakeDevice(frame))
+
+        with pytest.raises(MnetLoginRejectedError):
+            mnet.send_packet(b'\x02', b'\x13\xa1', b'')
+
+    def test_send_packet_login_rejected_frame_still_crc_checked(self):
+        """A corrupted "not logged in" frame must still fail on CRC, not be
+        silently accepted as a valid rejection."""
+        frame = bytearray(bytes(MnetPacket(b'\x01', b'\x02', b'\x13\x90', 0, b'')))
+        frame[-2] ^= 0x01  # flip a CRC byte
+        mnet = Mnet(FakeDevice(bytes(frame)))
+
+        import mnet as mnet_module
+        with pytest.raises(mnet_module.MnetFrameError):
+            mnet.send_packet(b'\x02', b'\x13\x8e', b'')
+
     def test_collect_turbine_data_checks_logged_in(self):
         """_collect_turbine_data should raise if not logged in."""
         monitor = MagicMock()

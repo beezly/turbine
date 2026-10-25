@@ -19,6 +19,12 @@ class MnetDecodeError(ValueError):
     """A well-framed reply could not be decoded or did not match its request."""
 
 
+class MnetLoginRejectedError(MnetDecodeError):
+    """The controller returned the documented "Remote not logged in" (0x1390)
+    reply to a login attempt: a valid, well-formed negative acknowledgement,
+    not a successful login and not frame/transport corruption."""
+
+
 class Event(NamedTuple):
     """A turbine event from the event stack."""
     index: int
@@ -181,6 +187,41 @@ class Mnet:
     REQ_LOGIN = b'\x13\xa1'          # hidden login ("Remote hidden login"); password not validated -> level 0
     REQ_LOGIN_STANDARD = b'\x13\x8e'  # standard login ("Remote login"); carries + validates the Turbine Password
 
+    # "Remote not logged in" (5008 / 0x1390): documented in docs/MNET.md as the
+    # controller's reply when a login attempt is rejected. It is a valid,
+    # well-formed negative reply, not an echo of the login request type.
+    REPLY_NOT_LOGGED_IN = b'\x13\x90'
+
+    # Request packet type -> set of documented valid reply packet types.
+    #
+    # The Mnet protocol does NOT universally echo request.packet_type back on
+    # the reply (see docs/MNET.md "Packet Type Codes" and "Message Sequence
+    # Examples"): most request/reply pairs use *different* codes (e.g.
+    # Request data 0x0C28 -> Reply data 0x0C29). Logins are a documented
+    # exception: a successful login reply echoes the login request's own
+    # type (0x138E or 0x13A1); a rejected login instead returns the shared
+    # "Remote not logged in" code 0x1390.
+    #
+    # Request types with NO documented reply code in docs/MNET.md (currently
+    # only REQ_COMMAND / 0x0C32, whose only caller logs whatever reply type
+    # comes back without asserting one) are intentionally left out of this
+    # map; send_packet falls back to requiring an exact echo for those so an
+    # unexpected reply type still raises instead of being silently invented.
+    # 0x0BEA (Acknowledge alarm) is included below even though no current
+    # caller in this file sends that request type, for completeness against
+    # docs/MNET.md and so a future caller gets correct validation for free.
+    REQUEST_RESPONSE_TYPES: Dict[bytes, frozenset] = {
+        REQ_DATA: frozenset({b'\x0c\x29'}),             # Request data -> Reply data
+        REQ_MULTIPLE_DATA: frozenset({b'\x0c\x2b'}),     # Request multiple data -> Reply multiple data
+        REQ_WRITE_DATA: frozenset({b'\x0c\x2d'}),        # Request write data -> Reply write data
+        REQ_SERIAL_NUMBER: frozenset({b'\x0c\x2f'}),     # Request serial no. -> Reply serial no.
+        b'\x0c\x04': frozenset({b'\x0c\x06'}),          # Display command type 2 -> 0xc06
+        b'\x0c\x05': frozenset({b'\x0c\x07'}),          # Display command type 3 -> 0xc07
+        b'\x0b\xea': frozenset({b'\x00\x01'}),          # Acknowledge alarm -> Reply Acknowledge (no current caller uses this request type)
+        REQ_LOGIN: frozenset({REQ_LOGIN, REPLY_NOT_LOGGED_IN}),              # hidden login: echo on success, 0x1390 on rejection
+        REQ_LOGIN_STANDARD: frozenset({REQ_LOGIN_STANDARD, REPLY_NOT_LOGGED_IN}),  # standard login: echo on success, 0x1390 on rejection
+    }
+
     # Login constants
     LOGIN_131_GAIA_WIND = b'\x31\x33\x31\x20\x66\x6b\x59\x75\x29\x29\x31\x32\x32\x32\x31\x51\x51\x61\x61\x00'
     # Payload offset 0x2a (big-endian dword). WPMS builder 0x59D2 fills this with the HASP
@@ -297,15 +338,34 @@ class Mnet:
         """Create an Mnet packet."""
         return MnetPacket(destination, self.id, packet_type, len(data), data)
     
-    def send_packet(self, destination: bytes, packet_type: bytes, data: bytes) -> MnetPacket:
+    def send_packet(self, destination: bytes, packet_type: bytes, data: bytes,
+                     expected_types: Optional[frozenset] = None) -> MnetPacket:
         """Send packet and return response.
-        
-        Validates the reply's identity: it must come from the device we addressed,
-        be addressed back to us, and echo the request's packet type.
-        
+
+        Validates the reply's identity: it must come from the device we
+        addressed, be addressed back to us, and use a packet type that is a
+        documented valid reply to this specific request type.
+
+        Per docs/MNET.md, the Mnet protocol does NOT universally echo the
+        request's packet type back on the reply -- most request/reply pairs
+        use distinct codes (e.g. Request data 0x0C28 -> Reply data 0x0C29).
+        The expected reply type set is resolved as follows:
+
+        1. ``expected_types`` if the caller passes one explicitly (lets a
+           caller override/narrow for a transaction-specific case).
+        2. ``REQUEST_RESPONSE_TYPES[packet_type]`` if the request type has a
+           documented mapping.
+        3. Otherwise, exact echo of ``packet_type`` -- this is a conservative
+           fallback for request types with no documented reply code (not an
+           assumption that echo is correct; any other reply is still
+           rejected).
+
         Raises:
-            MnetDecodeError: if the response source, destination or packet type
-                does not match the request
+            MnetLoginRejectedError: a login request got the documented
+                "Remote not logged in" (0x1390) reply -- a valid, well-formed
+                rejection, not a successful login and not corruption.
+            MnetDecodeError: the response source, destination, or packet type
+                does not match the request / documented mapping.
         """
         packet = self.create_packet(destination, packet_type, data)
         packet_bytes = bytes(packet)
@@ -329,12 +389,28 @@ class Mnet:
                 f"response destination mismatch: expected 0x{self.id.hex()}, "
                 f"got 0x{response.destination.hex()}")
 
-        # Validate response echoes the request's packet type
-        if response.packet_type != packet_type:
+        # Resolve the documented set of valid reply types for this request.
+        if expected_types is not None:
+            valid_types = expected_types
+        else:
+            valid_types = self.REQUEST_RESPONSE_TYPES.get(packet_type, frozenset({packet_type}))
+
+        if response.packet_type not in valid_types:
             raise MnetDecodeError(
-                f"response packet type mismatch: expected 0x{packet_type.hex()}, "
+                f"response packet type mismatch: expected one of "
+                f"{{{', '.join('0x' + t.hex() for t in sorted(valid_types))}}}, "
                 f"got 0x{response.packet_type.hex()}")
-        
+
+        # A login request that got the documented "not logged in" rejection
+        # reply is a valid negative, not a successful login: surface it as a
+        # distinct, specific error rather than letting callers mistake the
+        # well-formed rejection reply for a successful login response.
+        if (packet_type in (self.REQ_LOGIN, self.REQ_LOGIN_STANDARD)
+                and response.packet_type == self.REPLY_NOT_LOGGED_IN):
+            raise MnetLoginRejectedError(
+                f"login rejected: controller replied 0x{self.REPLY_NOT_LOGGED_IN.hex()} "
+                f"(Remote not logged in) to request 0x{packet_type.hex()}")
+
         # Log incoming response
         if self._log_callback:
             response_bytes = bytes(response)
